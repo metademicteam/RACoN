@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "racon-lab"
+version = "0.1.0"
+description = "RACoN Lab - Resource-Aware Compute Orchestration Network Laboratory"
+requires-python = ">=3.10,<3.15"
+dependencies = [
+    "PySide6>=6.5",
+    "psutil>=5.9",
+    "platformdirs>=4.0",
+]
+
+[project.optional-dependencies]
+laya = ["laya>=0.4"]
+dev = ["pytest>=7.0", "pytest-qt>=4.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
