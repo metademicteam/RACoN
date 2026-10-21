@@ -1,6 +1,19 @@
 """Shared styles and utility widgets for RACoN Lab UI."""
 from __future__ import annotations
 
+# Color palette constants (Catppuccin Mocha)
+BG_DARK = "#1e1e2e"
+BG_SURFACE = "#313244"
+CARD_BG = "#181825"
+BORDER_COLOR = "#45475a"
+TEXT_PRIMARY = "#cdd6f4"
+TEXT_SECONDARY = "#a6adc8"
+ACCENT_PURPLE = "#cba6f7"
+ACCENT_CYAN = "#89dceb"
+COLOR_SUCCESS = "#a6e3a1"
+COLOR_WARNING = "#f9e2af"
+COLOR_DANGER = "#f38ba8"
+
 DARK_STYLESHEET = """
 QMainWindow, QWidget {
     background-color: #1e1e2e;
