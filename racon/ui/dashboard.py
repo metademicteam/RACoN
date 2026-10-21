@@ -57,7 +57,7 @@ class DashboardPanel(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
 
         # Title
-        title = QLabel("⚡ RACoN Lab Dashboard")
+        title = QLabel("⚡ RACoN Dashboard")
         title.setObjectName("heading")
         layout.addWidget(title)
 

@@ -18,6 +18,7 @@ from racon.services.monitoring_service import MonitoringService
 from racon.storage.database import Database
 from racon.storage.repository import BenchmarkRepository
 from racon.ui.dashboard import DashboardPanel
+from racon.ui.chat_panel import ChatPanel
 from racon.ui.scheduler_lab import SchedulerLabPanel
 from racon.ui.benchmark_history import BenchmarkHistoryPanel
 from racon.ui.settings import SettingsPanel
@@ -28,11 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
-    """RACoN Lab main window with four tabbed panels."""
+    """RACoN main window with unified dashboard, chat, and orchestration panels."""
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RACoN Lab v0.1.0 — Resource-Aware Compute Orchestration")
+        self.setWindowTitle("RACoN v0.1.0 — Resource-Aware Compute Orchestration")
         self.setMinimumSize(1000, 700)
         self.resize(1200, 800)
         self.setStyleSheet(DARK_STYLESHEET)
@@ -61,12 +62,14 @@ class MainWindow(QMainWindow):
 
         # Panels
         self._dashboard = DashboardPanel()
+        self._chat_panel = ChatPanel()
+        self._worker_panel = WorkerAgentPanel()
         self._scheduler_lab = SchedulerLabPanel()
         self._history = BenchmarkHistoryPanel()
         self._settings = SettingsPanel()
-        self._worker_panel = WorkerAgentPanel()
 
         self._tabs.addTab(self._dashboard, "📊 Dashboard")
+        self._tabs.addTab(self._chat_panel, "💬 Chat")
         self._tabs.addTab(self._worker_panel, "🖥 Worker Agent")
         self._tabs.addTab(self._scheduler_lab, "🔬 Scheduler Lab")
         self._tabs.addTab(self._history, "📈 History")
@@ -210,7 +213,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up on close."""
-        logger.info("RACoN Lab closing")
+        logger.info("RACoN closing")
         if hasattr(self, "_worker_panel"):
             self._worker_panel.closeEvent(event)
         self._monitoring.stop()

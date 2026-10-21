@@ -126,7 +126,7 @@ class SettingsPanel(QWidget):
         # Version info
         ver_group = QGroupBox("About")
         ver_layout = QVBoxLayout(ver_group)
-        ver_layout.addWidget(QLabel(f"RACoN Lab v{__version__}"))
+        ver_layout.addWidget(QLabel(f"RACoN v{__version__}"))
         ver_layout.addWidget(QLabel(f"Python {platform.python_version()}"))
 
         # Dependencies

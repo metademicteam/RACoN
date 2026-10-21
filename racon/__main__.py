@@ -10,7 +10,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger = logging.getLogger("racon")
-    logger.info("RACoN Lab v0.1.0 starting")
+    logger.info("RACoN v0.1.0 starting")
 
     try:
         from PySide6.QtWidgets import QApplication
@@ -21,16 +21,16 @@ def main():
         sys.exit(1)
 
     app = QApplication(sys.argv)
-    app.setApplicationName("RACoN Lab")
+    app.setApplicationName("RACoN")
     app.setApplicationVersion("0.1.0")
     app.setOrganizationName("RACoN")
 
     window = RaconApp()
     window.show()
 
-    logger.info("RACoN Lab UI launched")
+    logger.info("RACoN UI launched")
     exit_code = app.exec()
-    logger.info("RACoN Lab shutting down (code=%d)", exit_code)
+    logger.info("RACoN shutting down (code=%d)", exit_code)
     sys.exit(exit_code)
 
 if __name__ == "__main__":

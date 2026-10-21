@@ -70,3 +70,5 @@ target/
 **/*.gguf
 !models/**/shards_manifest.json
 
+
+d-inference-master/

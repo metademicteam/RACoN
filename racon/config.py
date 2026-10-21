@@ -6,7 +6,7 @@ from platformdirs import user_data_dir, user_log_dir
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "RACoN Lab"
+APP_NAME = "RACoN"
 APP_AUTHOR = "RACoN"
 VERSION = "0.1.0"
 

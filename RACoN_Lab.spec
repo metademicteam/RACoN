@@ -54,6 +54,7 @@ hiddenimports = [
     'racon.storage.database',
     'racon.storage.repository',
     'racon.ui',
+    'racon.ui.chat_panel',
     'racon.ui.benchmark_history',
     'racon.ui.dashboard',
     'racon.ui.main_window',
@@ -61,6 +62,9 @@ hiddenimports = [
     'racon.ui.settings',
     'racon.ui.worker_panel',
     'racon.ui.styles',
+    'racon.runtime',
+    'racon.runtime.distributed_gguf',
+    'racon.runtime.rpc_worker',
 ]
 
 a = Analysis(
@@ -83,7 +87,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='RACoN_Lab',
+    name='RACoN',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -103,5 +107,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='RACoN_Lab',
+    name='RACoN',
 )
