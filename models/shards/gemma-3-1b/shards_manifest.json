@@ -1,0 +1,36 @@
+{
+  "model_name": "gemma-3-1b",
+  "architecture": "gemma3",
+  "total_layers": 26,
+  "total_tensors": 340,
+  "original_file_size": 806059360,
+  "original_sha256": "fcd05a80d8f617383259bf674729d35392664829ff9e467600b5392e11212d8c",
+  "split_strategy": "size_450MB",
+  "created_at": 1792598592.6592658,
+  "shards": [
+    {
+      "shard_index": 1,
+      "total_shards": 2,
+      "filename": "gemma-3-1b-split.gguf-00001-of-00002.gguf",
+      "file_path": "F:\\RACoN\\models\\shards\\gemma-3-1b\\gemma-3-1b-split.gguf-00001-of-00002.gguf",
+      "file_size_bytes": 451855520,
+      "sha256": "873135c360e50b1c72aa2e3ac828dd8bfdf5c802517e69e19167684f8ac20b16",
+      "tensor_count": 90,
+      "layer_start": 0,
+      "layer_end": 12,
+      "min_ram_mb": 542.2
+    },
+    {
+      "shard_index": 2,
+      "total_shards": 2,
+      "filename": "gemma-3-1b-split.gguf-00002-of-00002.gguf",
+      "file_path": "F:\\RACoN\\models\\shards\\gemma-3-1b\\gemma-3-1b-split.gguf-00002-of-00002.gguf",
+      "file_size_bytes": 354204064,
+      "sha256": "5ade62cc0e9e222248a9b6a9b7d98b821f9ffa9e38348a588fce62140f1ea538",
+      "tensor_count": 250,
+      "layer_start": 13,
+      "layer_end": 25,
+      "min_ram_mb": 425.0
+    }
+  ]
+}

@@ -38,6 +38,8 @@ class TaskType(str, Enum):
     TEXT_COMPLETION = "text_completion"
     EMBEDDING = "embedding"
     BENCHMARK_PROBE = "benchmark_probe"
+    DISTRIBUTED_INFERENCE = "distributed_inference"
+    SHARD_VERIFICATION = "shard_verification"
 
 
 class TaskState(str, Enum):
@@ -64,6 +66,8 @@ class HardwareCapabilities(BaseModel):
     runtimes: List[str] = Field(default_factory=list, max_length=16)
     os_name: str = Field(..., max_length=128)
     is_simulated: bool = False
+    rpc_endpoint: Optional[str] = Field(None, max_length=128)
+    assigned_shards: List[str] = Field(default_factory=list, max_length=64)
 
 
 class EnrollmentRequest(BaseModel):

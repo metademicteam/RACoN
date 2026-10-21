@@ -79,6 +79,8 @@ class RaconAgent:
         self._coordinator_public_key_hex: Optional[str] = None
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
+        self.rpc_server: Optional[Any] = None
+        self.rpc_endpoint: Optional[str] = None
 
     def enroll(self, invite_code: str) -> bool:
         """Enroll with coordinator using an invite code."""
@@ -301,6 +303,52 @@ class RaconAgent:
                 "mode": "LOCAL",
             }, None
 
+        # 3. Distributed Layer Inference (ADR-012)
+        elif task_type == TaskType.DISTRIBUTED_INFERENCE.value or task_type == "distributed_inference":
+            from racon.runtime.rpc_worker import DistributedPipelineEngine
+            rpc_endpoints = parameters.get("rpc_endpoints", [])
+            prompt = parameters.get("prompt", "Hello RACoN")
+            model_path = parameters.get("model_path", model_name)
+            max_tokens = int(parameters.get("max_tokens", 32))
+            n_gpu_layers = int(parameters.get("n_gpu_layers", 26))
+
+            engine = DistributedPipelineEngine()
+            result = engine.execute(
+                model_path=model_path,
+                rpc_endpoints=rpc_endpoints,
+                prompt=prompt,
+                max_tokens=max_tokens,
+                n_gpu_layers=n_gpu_layers,
+            )
+
+            if result.error:
+                return {}, result.error
+
+            return {
+                "response": result.response,
+                "prompt_tps": result.prompt_tokens_per_second,
+                "eval_tps": result.generation_tokens_per_second,
+                "total_duration_s": result.total_duration_seconds,
+                "memory_breakdown": result.memory_breakdown,
+                "rpc_endpoints": result.rpc_endpoints,
+                "layers_offloaded": result.layers_offloaded,
+                "runtime": "llama_rpc_distributed",
+                "mode": "OBSERVED",
+            }, None
+
+        # 4. Shard Verification (ADR-012)
+        elif task_type == TaskType.SHARD_VERIFICATION.value or task_type == "shard_verification":
+            from racon.runtime.distributed_gguf import verify_shard
+            shard_path = parameters.get("shard_path", "")
+            expected_sha256 = parameters.get("expected_sha256", "")
+
+            valid = verify_shard(shard_path, expected_sha256)
+            return {
+                "shard_path": shard_path,
+                "valid": valid,
+                "mode": "OBSERVED",
+            }, None if valid else f"Shard integrity check failed for {shard_path}"
+
         else:
             return {}, f"Disallowed task type: '{task_type}'. Workers accept allow-listed tasks only."
 
@@ -323,12 +371,31 @@ class RaconAgent:
         self._worker_thread = threading.Thread(target=_loop, daemon=True, name="RACoNAgentWorker")
         self._worker_thread.start()
 
+    def start_rpc_worker(self, host: str = "0.0.0.0", port: int = 50052, threads: int = 4) -> bool:
+        """Start the native llama.cpp RPC server for remote layer execution."""
+        from racon.runtime.rpc_worker import RpcServerProcess
+        if self.rpc_server and self.rpc_server.is_running():
+            return True
+        self.rpc_server = RpcServerProcess(host=host, port=port, threads=threads)
+        ok = self.rpc_server.start()
+        if ok:
+            self.rpc_endpoint = f"{host}:{port}"
+        return ok
+
+    def stop_rpc_worker(self) -> None:
+        """Stop the RPC worker process."""
+        if self.rpc_server:
+            self.rpc_server.stop()
+            self.rpc_server = None
+            self.rpc_endpoint = None
+
     def stop(self) -> None:
-        """Gracefully stop the background worker thread."""
+        """Gracefully stop the background worker thread and any running RPC servers."""
         self._stop_event.set()
         self.status.is_running = False
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
+        self.stop_rpc_worker()
 
     def pause(self) -> None:
         self.status.is_paused = True
@@ -349,4 +416,5 @@ class RaconAgent:
             "failed_tasks_count": self.status.failed_tasks_count,
             "last_heartbeat_time": self.status.last_heartbeat_time,
             "last_error": self.status.last_error,
+            "rpc_endpoint": self.rpc_endpoint,
         }
