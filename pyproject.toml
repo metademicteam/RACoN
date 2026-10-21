@@ -20,3 +20,6 @@ dev = ["pytest>=7.0", "pytest-qt>=4.0"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
+markers = [
+    "live_laya: Opt-in smoke tests using live Laya model downloads",
+]

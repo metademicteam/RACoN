@@ -209,6 +209,8 @@ class MainWindow(QMainWindow):
         """Clean up on close."""
         logger.info("RACoN Lab closing")
         self._monitoring.stop()
+        if hasattr(self._benchmark_service, "cancel_or_wait"):
+            self._benchmark_service.cancel_or_wait()
         self._benchmark_service.laya_adapter.shutdown()
         self._db.close()
         super().closeEvent(event)

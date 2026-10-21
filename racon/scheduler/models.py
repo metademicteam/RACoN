@@ -92,6 +92,7 @@ class SchedulerResult:
     # Laya recommendation (shadow or assisted)
     laya_recommendation: Optional[str] = None
     laya_confidence: Optional[float] = None
+    laya_checkpoint: Optional[str] = None
     laya_used_successfully: bool = False
 
     # Final decision

@@ -48,3 +48,20 @@ racon_diagnostics.json
 *.swo
 Thumbs.db
 Desktop.ini
+
+# Environment files
+.env
+.env.local
+*.key
+*.pem
+
+
+# Node.js dependencies
+node_modules/
+**/node_modules/
+
+
+# Rust target build directories
+target/
+**/target/
+

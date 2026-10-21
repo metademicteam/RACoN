@@ -202,3 +202,11 @@ class BenchmarkService(QObject):
 
     def clear_history(self) -> bool:
         return self._repository.clear_all_runs()
+
+    def cancel_or_wait(self, timeout_ms: int = 3000):
+        """Orderly shutdown of active background threads."""
+        for thread in [self._scheduler_thread, self._laya_thread]:
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait(timeout_ms)
+        self._busy = False

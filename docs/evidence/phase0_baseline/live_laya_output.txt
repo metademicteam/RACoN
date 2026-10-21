@@ -1,0 +1,19 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- F:\RACoN\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: F:\RACoN
+configfile: pyproject.toml
+plugins: anyio-4.15.1, platformdirs-4.13.5
+collecting ... collected 3 items
+
+tests/test_live_laya.py::test_live_laya_package_availability PASSED
+tests/test_live_laya.py::test_live_laya_router_initialization_and_shutdown PASSED
+tests/test_live_laya.py::test_live_laya_decision_pipeline PASSED
+
+============================== warnings summary ===============================
+tests/test_live_laya.py::test_live_laya_decision_pipeline
+  F:\RACoN\.venv\Lib\site-packages\laya\router.py:999: RuntimeWarning: laya: this checkpoint ships invalid temperatures or values outside [0.5, 5]; using choice:11+=0.10058280825614929 -> 0.5. Treat confidence from the affected entries as uncalibrated.
+    return Agent(repo, **kwargs)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 3 passed, 1 warning in 12.61s ========================

@@ -1,162 +1,120 @@
-# RACoN Lab v0.1.0
+# RACoN — Resource-Aware Collaborative Network
 
-**Resource-Aware Compute Orchestration Network — Laboratory Edition**
+**Production-Oriented Local-First Distributed AI Compute Platform with Laya-Assisted Scheduling**
 
-RACoN Lab is an experimental desktop application for testing resource-aware scheduling decisions. It demonstrates real hardware discovery, deterministic scheduling, and optional Laya-assisted AI scheduling decisions.
+---
 
-> **Version 0.1 Prototype** — This version does not implement real distributed LLM inference. Scheduling scenarios use simulated worker candidates, clearly labeled as such. No model execution occurs across multiple PCs.
+## 1. Overview
+RACoN is a local-first platform designed to aggregate, manage, and coordinate CPU, GPU, and memory resources for distributed AI execution.
+The platform integrates:
+1. **Desktop Management Application**: Built with **Tauri v2 + React 18 (TypeScript, Vite, TailwindCSS)**.
+2. **Local Coordinator Backend**: High-performance **FastAPI** service bound strictly to loopback (`127.0.0.1:8765`) protected by an ephemeral authorization token.
+3. **Hardware Discovery**: Safe, non-fabricated telemetry via `psutil` and native Windows platform interfaces (Intel UHD 630 iGPU safe fallback).
+4. **Laya Decision Advisor**: Integrated using official Laya `Router.predict` with typed choice decision primitives in **Deterministic**, **Shadow**, and **Laya-Assisted** modes.
+5. **Model Runtimes**: Local model integration with **Ollama** (`127.0.0.1:11434`) and distributed tensor execution protocol abstraction.
+6. **Local Persistence**: **SQLAlchemy 2.0 + SQLite WAL** with support for optional Supabase cloud syncing.
+7. **Companion CLI**: Typer-based developer CLI (`racon status`, `racon node list`, `racon scheduler preview`, etc.).
 
-## Features
+---
 
-- **Real Hardware Discovery** — Detects CPU, RAM, GPU, and system information using `psutil` and system interfaces
-- **8 Predefined Scheduling Scenarios** — Tests ranging from single feasible worker to no-feasible-solution edge cases
-- **4 Scheduling Objectives** — Lowest latency, highest throughput, resource efficiency, and balanced
-- **3 Scheduling Modes** — Deterministic, Laya Shadow (advisory), and Laya-Assisted (with fallback)
-- **SQLite Persistence** — All benchmark runs saved and exportable as CSV/JSON
-- **Dark-Themed Desktop UI** — Built with PySide6, responsive with background thread operations
+## 2. Quick Start
 
-## Quick Start
+### 2.1 Prerequisites
+- **Windows 11 (64-bit)**
+- **Python 3.12**
+- **Node.js v20+**
+- **Rust (rustc/cargo 1.80+)**
+- *(Optional)* **Ollama** running locally at `http://127.0.0.1:11434`
+- *(Optional)* `laya` package (`pip install laya`)
 
-### Prerequisites
+---
 
-- **Python 3.10–3.14** (tested with 3.12)
-- **Windows 11** (primary target)
-- No internet required for normal operation (only for initial Laya checkpoint download)
+### 2.2 Launching the Application
 
-### Install & Run
-
+#### Option A: One-Click Windows Launcher
+```cmd
+run.bat
+```
+or via PowerShell:
 ```powershell
-# Option 1: Automatic setup
 .\run.ps1
-
-# Option 2: Manual setup
-python -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-python -m racon
 ```
 
-### Run Tests
+#### Option B: Launch Desktop via Tauri Dev
+```powershell
+# 1. Start FastAPI Coordinator Backend
+.\.venv\Scripts\python.exe -m uvicorn backend.racon.api.app:app --host 127.0.0.1 --port 8765
+
+# 2. In another terminal, launch Tauri v2 Desktop UI
+cd apps\desktop
+npm run tauri dev
+```
+
+---
+
+## 3. Companion CLI Usage
+
+The companion CLI provides terminal-based administration against the local coordinator:
 
 ```powershell
-# With venv activated:
-pytest tests/ -v
+# Check cluster status and hardware gauges
+.\.venv\Scripts\python.exe cli\racon_cli.py status
 
-# Or without activation:
-.\.venv\Scripts\python.exe -m pytest tests/ -v
+# Run system diagnostic checks
+.\.venv\Scripts\python.exe cli\racon_cli.py doctor
+
+# List registered compute nodes
+.\.venv\Scripts\python.exe cli\racon_cli.py node list
+
+# List local Ollama models
+.\.venv\Scripts\python.exe cli\racon_cli.py models list
+
+# Run a scheduler preview over test scenarios
+.\.venv\Scripts\python.exe cli\racon_cli.py scheduler preview --scenario "Multiple Feasible Candidates" --objective balanced --mode deterministic
+
+# Run and record a benchmark
+.\.venv\Scripts\python.exe cli\racon_cli.py benchmark run --scenario "High Latency Network" --objective lowest_latency
 ```
 
-## Application Layout
+---
 
-| Tab | Purpose |
-|-----|---------|
-| **Dashboard** | Real-time CPU/RAM metrics, hardware info, last decision summary |
-| **Scheduler Lab** | Select scenarios, objectives, and modes; run scheduler; view evaluations |
-| **History** | Browse past runs, inspect details, export CSV/JSON |
-| **Settings** | Default mode/objective, Laya status, paths, diagnostics export |
+## 4. Testing & Verification
 
-## Scheduling Scenarios
-
-| # | Scenario | Expected Outcome |
-|---|----------|-----------------|
-| 1 | Single Feasible Worker | Worker selected |
-| 2 | Multiple Feasible Candidates | Best scored worker selected |
-| 3 | Insufficient Memory Worker | Rejected — insufficient RAM |
-| 4 | Incompatible Runtime Worker | Rejected — wrong device type |
-| 5 | High Latency Network | Low-latency worker preferred |
-| 6 | Busy Worker | Rejected — fully loaded |
-| 7 | Unavailable Worker | Rejected — offline |
-| 8 | No Feasible Solution | Clear failure reported |
-
-## Scheduling Modes
-
-### Deterministic (Default)
-Rule-based scoring with documented formulas. Identical inputs always produce identical results.
-
-### Laya Shadow
-Deterministic scheduler decides. Laya evaluates the same candidates and its recommendation is recorded separately. **Laya does not change the result.**
-
-### Laya-Assisted
-Laya selects from deterministic-validated feasible candidates. If Laya fails, times out, or returns an invalid result, the deterministic fallback is used with a logged reason.
-
-## Laya Integration
-
-Laya is **optional**. The application works fully without it.
-
-To enable Laya:
-1. Install: `pip install laya`
-2. In the app, click **Initialize Laya** (downloads ~400-800 MB checkpoint on first use)
-3. Select "Laya Shadow" or "Laya Assisted" mode
-
-Laya uses the `Router.predict` API with a `choice` question to select among scheduling candidates.
-
-## Project Structure
-
-```
-racon/
-├── __init__.py          # Package version
-├── __main__.py          # Entry point (python -m racon)
-├── app.py               # Application class
-├── config.py            # Paths and configuration
-├── hardware.py          # Hardware discovery (psutil, WMI)
-├── scheduler/
-│   ├── models.py        # Data models (WorkerCandidate, SchedulerResult, etc.)
-│   ├── deterministic.py # Rule-based scheduler with 4 objectives
-│   ├── laya_adapter.py  # Laya Router integration adapter
-│   └── evaluation.py    # Scheduling engine (3 modes)
-├── scenarios/
-│   ├── sample_scenarios.json  # 8 predefined scenarios
-│   └── loader.py        # Scenario parser
-├── storage/
-│   ├── database.py      # SQLite initialization
-│   └── repository.py    # CRUD operations
-├── services/
-│   ├── benchmark_service.py   # Background scheduler execution
-│   └── monitoring_service.py  # Periodic hardware polling
-└── ui/
-    ├── main_window.py   # Main window with tabs
-    ├── dashboard.py     # Hardware metrics panel
-    ├── scheduler_lab.py # Scheduler interface
-    ├── benchmark_history.py  # History viewer
-    ├── settings.py      # Settings panel
-    └── styles.py        # Dark theme stylesheet
-tests/
-├── test_deterministic_scheduler.py
-├── test_laya_adapter.py
-├── test_storage.py
-└── test_hardware.py
+Run the full automated test suite:
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -v
 ```
 
-## Data Storage
+All 80 unit and integration tests cover:
+- FastAPI REST API v1 endpoints (health, status, nodes, models, scheduler preview, jobs, benchmarks, settings, logs).
+- Hardware telemetry non-fabrication (Intel UHD 630 iGPU safe fallback).
+- Ollama runtime inspection and execution error handling.
+- Distributed runtime simulation labeling and task state machine transitions (`QUEUED` -> `VALIDATING` -> `SCHEDULED` -> `RUNNING` -> `COMPLETED`/`FAILED`).
+- Worker manager local node registration and heartbeat timeout detection.
+- Deterministic constraint checking and scoring formulas across all 4 objectives.
+- Laya adapter lifecycle, timeout, and fallback.
+- SQLite WAL durability and transactions across reconnects.
 
-- **Database**: `%LOCALAPPDATA%/RACoN Lab/RACoN/racon_lab.db`
-- **Logs**: `%LOCALAPPDATA%/RACoN Lab/RACoN/Logs/racon_lab.log`
+---
 
-## Troubleshooting
+## 5. Architectural Principles
 
-| Issue | Solution |
-|-------|----------|
-| `ModuleNotFoundError: PySide6` | Run `pip install PySide6` in your virtual environment |
-| `ModuleNotFoundError: laya` | Laya is optional. Install with `pip install laya` only if needed |
-| App won't start | Verify Python 3.10+ with `python --version` |
-| GPU shows "Not detected" | Expected for Intel iGPU without nvidia-smi |
-| Laya initialization fails | Requires internet for first checkpoint download |
+1. **System RAM is not GPU VRAM**: Resource checks explicitly account for device-specific memory constraints.
+2. **Strict Non-Fabrication**: Integrated GPUs (e.g., Intel UHD 630) that do not expose standard queryable VRAM metrics report `Unavailable` rather than synthetic numbers.
+3. **Laya Decision Scope**: Laya evaluates typed candidate decisions; it does not generate chat responses or override hard constraints.
+4. **Local-First Security**: Internal APIs bind strictly to loopback (`127.0.0.1`) and require ephemeral authorization tokens.
+5. **No Orphan Processes**: Native Tauri sidecar lifecycle ensures child Python and worker processes terminate cleanly upon exit.
 
-## Limitations (v0.1)
+---
 
-- No real distributed inference — all scheduling scenarios use simulated workers
-- No network worker discovery — workers are predefined in scenario files
-- No model execution — scheduler evaluates placements but does not run models
-- GPU telemetry unavailable for Intel integrated graphics
-- Laya is optional and requires manual initialization
-
-## Next Milestone: v0.2
-
-- Real worker discovery via network scanning
-- Actual model inference benchmarking on local hardware
-- Worker registration and health monitoring
-- Multi-computer coordination prototype
-
-## License
-
-Internal prototype — not yet licensed for distribution.
+## 6. Documentation Index
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Comprehensive system architecture and layer boundaries.
+- [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — Multi-phase milestones and deliverables.
+- [`docs/MVP_ACCEPTANCE.md`](docs/MVP_ACCEPTANCE.md) — Acceptance criteria and test matrix.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — Threat model and security policy.
+- [`docs/LAYA_INTEGRATION.md`](docs/LAYA_INTEGRATION.md) — Laya decision engine integration details.
+- [`docs/SCHEDULER.md`](docs/SCHEDULER.md) — Mathematical scoring rules and hard-constraint logic.
+- [`docs/DISTRIBUTED_RUNTIME.md`](docs/DISTRIBUTED_RUNTIME.md) — Worker protocol and execution mode boundaries.
+- [`docs/TAILSCALE_DOCKER.md`](docs/TAILSCALE_DOCKER.md) — Tailscale mesh remote access and Docker container deployment guide.
+- [`docs/BUILD_WINDOWS.md`](docs/BUILD_WINDOWS.md) — Windows packaging and installer compilation.
+- [`CHANGELOG.md`](CHANGELOG.md) — Version history and release notes.

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+node_modules
+**/node_modules
+/dist
+/build
+/target
+.pytest_cache
+__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+*.log
+*.sqlite
+*.db
+.env

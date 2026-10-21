@@ -1,0 +1,39 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RACoN Desktop",
+  "version": "0.2.0",
+  "identifier": "com.racon.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "RACoN Desktop — Local-First Distributed AI Compute & Model Hub",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 1024,
+        "minHeight": 700,
+        "center": true,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' 'unsafe-inline' http://127.0.0.1:* ws://127.0.0.1:* http://100.76.208.54:* https://desktop-b7l73cl.tail6cb521.ts.net"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}

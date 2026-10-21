@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -66,61 +67,75 @@ CREATE INDEX IF NOT EXISTS idx_candidate_evaluations_run_id
 
 
 class Database:
-    """SQLite database manager."""
+    """Thread-safe SQLite database manager."""
 
     def __init__(self, db_path: Optional[Path] = None):
         self._db_path = db_path or get_db_path()
-        self._conn: Optional[sqlite3.Connection] = None
+        self._local = threading.local()
+        self._write_lock = threading.Lock()
         self._initialized = False
 
     @property
     def path(self) -> Path:
         return self._db_path
 
+    @property
+    def write_lock(self) -> threading.Lock:
+        return self._write_lock
+
     def connect(self) -> sqlite3.Connection:
-        """Get or create a database connection."""
-        if self._conn is None:
+        """Get or create a thread-local database connection."""
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
             try:
                 self._db_path.parent.mkdir(parents=True, exist_ok=True)
-                self._conn = sqlite3.connect(str(self._db_path))
-                self._conn.row_factory = sqlite3.Row
-                self._conn.execute("PRAGMA journal_mode=WAL")
-                self._conn.execute("PRAGMA foreign_keys=ON")
-                logger.info("Connected to database: %s", self._db_path)
+                conn = sqlite3.connect(
+                    str(self._db_path),
+                    timeout=30.0,
+                    check_same_thread=False,
+                )
+                conn.row_factory = sqlite3.Row
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA foreign_keys=ON")
+                conn.execute("PRAGMA busy_timeout=5000")
+                self._local.conn = conn
+                logger.debug("Opened database connection for thread %s", threading.get_ident())
             except sqlite3.Error as e:
                 logger.error("Database connection failed: %s", e)
                 raise
-        return self._conn
+        return conn
 
     def initialize(self):
         """Create tables if they don't exist."""
         if self._initialized:
             return
-        conn = self.connect()
-        try:
-            conn.executescript(CREATE_TABLES_SQL)
-            # Check schema version
-            cursor = conn.execute("SELECT MAX(version) FROM schema_info")
-            row = cursor.fetchone()
-            if row[0] is None:
-                conn.execute(
-                    "INSERT INTO schema_info (version) VALUES (?)",
-                    (SCHEMA_VERSION,)
-                )
-                conn.commit()
-            self._initialized = True
-            logger.info("Database initialized (schema v%d)", SCHEMA_VERSION)
-        except sqlite3.Error as e:
-            logger.error("Database initialization failed: %s", e)
-            raise
+        with self._write_lock:
+            conn = self.connect()
+            try:
+                conn.executescript(CREATE_TABLES_SQL)
+                # Check schema version
+                cursor = conn.execute("SELECT MAX(version) FROM schema_info")
+                row = cursor.fetchone()
+                if row[0] is None:
+                    conn.execute(
+                        "INSERT INTO schema_info (version) VALUES (?)",
+                        (SCHEMA_VERSION,)
+                    )
+                    conn.commit()
+                self._initialized = True
+                logger.info("Database initialized (schema v%d)", SCHEMA_VERSION)
+            except sqlite3.Error as e:
+                logger.error("Database initialization failed: %s", e)
+                raise
 
     def close(self):
-        """Close the database connection."""
-        if self._conn:
+        """Close the thread-local database connection."""
+        conn = getattr(self._local, "conn", None)
+        if conn:
             try:
-                self._conn.close()
+                conn.close()
             except sqlite3.Error:
                 pass
-            self._conn = None
-            self._initialized = False
-            logger.info("Database connection closed")
+            self._local.conn = None
+        self._initialized = False
+        logger.info("Database connection closed for thread")

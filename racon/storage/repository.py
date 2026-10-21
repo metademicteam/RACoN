@@ -23,59 +23,63 @@ class BenchmarkRepository:
 
     def save_run(self, result: SchedulerResult) -> bool:
         """Save a benchmark run and its candidate evaluations."""
-        conn = self.db.connect()
-        try:
-            conn.execute(
-                """
-                INSERT INTO benchmark_runs (
-                    run_id, timestamp, scenario_name, objective, mode,
-                    candidate_count, feasible_count,
-                    deterministic_choice, deterministic_score,
-                    laya_recommendation, laya_confidence, laya_used_successfully,
-                    final_choice, final_score,
-                    decision_duration_ms, fallback_used, fallback_reason,
-                    success, failure_reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    result.run_id, result.timestamp, result.scenario_name,
-                    result.objective.value, result.mode.value,
-                    result.candidate_count, result.feasible_count,
-                    result.deterministic_choice, result.deterministic_score,
-                    result.laya_recommendation, result.laya_confidence,
-                    1 if result.laya_used_successfully else 0,
-                    result.final_choice, result.final_score,
-                    result.decision_duration_ms,
-                    1 if result.fallback_used else 0, result.fallback_reason,
-                    1 if result.success else 0, result.failure_reason,
-                ),
-            )
-
-            for ev in result.evaluations:
+        with self.db.write_lock:
+            conn = self.db.connect()
+            try:
                 conn.execute(
                     """
-                    INSERT INTO candidate_evaluations (
-                        run_id, worker_id, is_feasible, is_simulated,
-                        score, rejection_reasons, score_components
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO benchmark_runs (
+                        run_id, timestamp, scenario_name, objective, mode,
+                        candidate_count, feasible_count,
+                        deterministic_choice, deterministic_score,
+                        laya_recommendation, laya_confidence, laya_used_successfully,
+                        final_choice, final_score,
+                        decision_duration_ms, fallback_used, fallback_reason,
+                        success, failure_reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        result.run_id, ev.worker_id,
-                        1 if ev.is_feasible else 0,
-                        1 if ev.is_simulated else 0,
-                        ev.score,
-                        json.dumps(ev.rejection_reasons) if ev.rejection_reasons else None,
-                        json.dumps(ev.score_components) if ev.score_components else None,
+                        result.run_id, result.timestamp, result.scenario_name,
+                        result.objective.value, result.mode.value,
+                        result.candidate_count, result.feasible_count,
+                        result.deterministic_choice, result.deterministic_score,
+                        result.laya_recommendation, result.laya_confidence,
+                        1 if result.laya_used_successfully else 0,
+                        result.final_choice, result.final_score,
+                        result.decision_duration_ms,
+                        1 if result.fallback_used else 0, result.fallback_reason,
+                        1 if result.success else 0, result.failure_reason,
                     ),
                 )
 
-            conn.commit()
-            logger.info("Saved benchmark run %s", result.run_id)
-            return True
-        except sqlite3.Error as e:
-            logger.error("Failed to save benchmark run: %s", e)
-            conn.rollback()
-            return False
+                for ev in result.evaluations:
+                    conn.execute(
+                        """
+                        INSERT INTO candidate_evaluations (
+                            run_id, worker_id, is_feasible, is_simulated,
+                            score, rejection_reasons, score_components
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            result.run_id, ev.worker_id,
+                            1 if ev.is_feasible else 0,
+                            1 if ev.is_simulated else 0,
+                            ev.score,
+                            json.dumps(ev.rejection_reasons) if ev.rejection_reasons else None,
+                            json.dumps(ev.score_components) if ev.score_components else None,
+                        ),
+                    )
+
+                conn.commit()
+                logger.info("Saved benchmark run %s", result.run_id)
+                return True
+            except sqlite3.Error as e:
+                logger.error("Failed to save benchmark run: %s", e)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return False
 
     def get_all_runs(self) -> list[dict]:
         """Retrieve all benchmark runs, ordered by timestamp descending."""
@@ -122,17 +126,21 @@ class BenchmarkRepository:
 
     def clear_all_runs(self) -> bool:
         """Delete all benchmark data."""
-        conn = self.db.connect()
-        try:
-            conn.execute("DELETE FROM candidate_evaluations")
-            conn.execute("DELETE FROM benchmark_runs")
-            conn.commit()
-            logger.info("Cleared all benchmark runs")
-            return True
-        except sqlite3.Error as e:
-            logger.error("Failed to clear runs: %s", e)
-            conn.rollback()
-            return False
+        with self.db.write_lock:
+            conn = self.db.connect()
+            try:
+                conn.execute("DELETE FROM candidate_evaluations")
+                conn.execute("DELETE FROM benchmark_runs")
+                conn.commit()
+                logger.info("Cleared all benchmark runs")
+                return True
+            except sqlite3.Error as e:
+                logger.error("Failed to clear runs: %s", e)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                return False
 
     def export_runs_csv(self) -> str:
         """Export all runs as CSV string."""
@@ -166,18 +174,19 @@ class BenchmarkRepository:
 
     def set_setting(self, key: str, value: str) -> bool:
         """Store a setting value."""
-        conn = self.db.connect()
-        try:
-            conn.execute(
-                """
-                INSERT INTO settings (key, value, updated_at)
-                VALUES (?, ?, datetime('now'))
-                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-                """,
-                (key, value),
-            )
-            conn.commit()
-            return True
-        except sqlite3.Error as e:
-            logger.error("Failed to save setting %s: %s", key, e)
-            return False
+        with self.db.write_lock:
+            conn = self.db.connect()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO settings (key, value, updated_at)
+                    VALUES (?, ?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+                    """,
+                    (key, value),
+                )
+                conn.commit()
+                return True
+            except sqlite3.Error as e:
+                logger.error("Failed to save setting %s: %s", key, e)
+                return False

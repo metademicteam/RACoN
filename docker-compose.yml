@@ -1,0 +1,147 @@
+name: racn-coordinator
+
+services:
+  # 1. RACoN Coordinator API Service
+  racn-coordinator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: racn-coordinator
+    image: racn-coordinator:1.1
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+      - "8443:8765"
+    environment:
+      - RACON_HOST=0.0.0.0
+      - RACON_PORT=8765
+      - RACON_DATA_DIR=/data
+      - AUTH_TOKEN=${AUTH_TOKEN:-racon-local-dev-token}
+      - REDIS_URL=redis://racn-redis:6379/0
+      - LLAMA_SERVER_URL=http://racn-llama:8080
+      - MODEL_REGISTRY_URL=http://racn-model-registry:8001
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - NEXT_PUBLIC_SUPABASE_URL=https://aqqfhueypxkikgcbrfbn.supabase.co
+      - NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_DeyUioAnjw7JEub6D0ppSA_Veei_BQc
+      - RACON_CORS_ORIGINS=*
+      - RACON_DEV_MODE=false
+    volumes:
+      - racon-data:/data
+      - racon-models:/models
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      racn-redis:
+        condition: service_started
+      racn-llama:
+        condition: service_started
+      racn-model-registry:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8765/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - racon-net
+
+  # 2. RACoN Web App Frontend
+  racn-webapp:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: racn-webapp
+    image: racn-webapp:1.1
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+      - "1420:80"
+    depends_on:
+      racn-coordinator:
+        condition: service_healthy
+    networks:
+      - racon-net
+
+  # 3. Dedicated llama.cpp CPU Inference Microservice
+  racn-llama:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.llama
+    container_name: racn-llama
+    image: racn-llama:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - LLAMA_THREADS=4
+    volumes:
+      - racon-models:/models
+    networks:
+      - racon-net
+
+  # 4. Dedicated Model Registry & GGUF Storage Service
+  racn-model-registry:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.model_registry
+    container_name: racn-model-registry
+    image: racn-model-registry:latest
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+      - "9003:8001"
+    environment:
+      - MODELS_DIR=/models
+    volumes:
+      - racon-models:/models
+    networks:
+      - racon-net
+
+  # 5. Redis State Cache & Worker Coordination Queue
+  racn-redis:
+    image: redis:7-alpine
+    container_name: racn-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - racon-redis-data:/data
+    networks:
+      - racon-net
+
+  # 6. Tailscale Funnel Public Internet Gateway (Profile: funnel)
+  # Run: docker compose --profile funnel up -d
+  racn-funnel:
+    image: tailscale/tailscale:latest
+    container_name: racn-funnel
+    profiles:
+      - funnel
+      - tailscale
+    restart: unless-stopped
+    hostname: racon-cluster
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:-}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=true
+      - TS_EXTRA_ARGS=--advertise-tags=tag:container
+    volumes:
+      - racon-tailscale-state:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      - racon-net
+
+volumes:
+  racon-data:
+    driver: local
+  racon-models:
+    driver: local
+  racon-redis-data:
+    driver: local
+  racon-tailscale-state:
+    driver: local
+
+networks:
+  racon-net:
+    driver: bridge

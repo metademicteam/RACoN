@@ -130,6 +130,7 @@ class SchedulingEngine:
         if decision.success:
             result.laya_recommendation = decision.selected_id
             result.laya_confidence = decision.confidence
+            result.laya_checkpoint = decision.checkpoint_name
             result.laya_used_successfully = True
         else:
             result.fallback_reason = decision.error
@@ -171,6 +172,7 @@ class SchedulingEngine:
 
         result.laya_recommendation = decision.selected_id
         result.laya_confidence = decision.confidence
+        result.laya_checkpoint = decision.checkpoint_name
         result.laya_used_successfully = True
         result.final_choice = decision.selected_id
         result.final_score = selected_eval.score if selected_eval else None

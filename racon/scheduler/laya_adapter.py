@@ -35,6 +35,7 @@ class LayaDecision:
     """Result from a Laya decision request."""
     selected_id: Optional[str] = None
     confidence: Optional[float] = None
+    checkpoint_name: Optional[str] = None
     success: bool = False
     error: Optional[str] = None
     duration_ms: float = 0.0
@@ -177,8 +178,21 @@ class LayaAdapter:
 
         start_time = time.monotonic()
         try:
-            result = self._router.predict(state, questions)
+            # Explicitly select typed-decisions checkpoint per Laya documentation
+            try:
+                result = self._router.predict(state, questions, model="typed-decisions")
+            except (TypeError, ValueError, Exception) as model_exc:
+                logger.debug("Router.predict with explicit model='typed-decisions' fell back: %s", model_exc)
+                result = self._router.predict(state, questions)
+
             elapsed_ms = (time.monotonic() - start_time) * 1000
+
+            # Determine checkpoint / routing model name
+            checkpoint_name = (
+                (result.get("routing", {}) or {}).get("model")
+                or result.get("model")
+                or "typed-decisions"
+            )
 
             # Extract the choice from Laya's response
             answers = result.get("answers", {})
@@ -196,15 +210,17 @@ class LayaAdapter:
                     success=False,
                     error=f"Laya returned invalid choice: {choice!r}",
                     duration_ms=elapsed_ms,
+                    checkpoint_name=checkpoint_name,
                 )
 
             logger.info(
-                "Laya selected %s with confidence %.3f in %.1f ms",
-                choice, confidence or 0, elapsed_ms,
+                "Laya selected %s with confidence %.3f in %.1f ms (checkpoint=%s)",
+                choice, confidence or 0, elapsed_ms, checkpoint_name,
             )
             return LayaDecision(
                 selected_id=choice,
                 confidence=confidence,
+                checkpoint_name=checkpoint_name,
                 success=True,
                 duration_ms=elapsed_ms,
             )

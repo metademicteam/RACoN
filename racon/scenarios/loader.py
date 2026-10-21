@@ -10,9 +10,22 @@ from racon.scheduler.models import (
     WorkerCandidate, WorkerStatus, DeviceType,
 )
 
+import sys
+
 logger = logging.getLogger(__name__)
 
-_SCENARIOS_FILE = Path(__file__).parent / "sample_scenarios.json"
+def _resolve_scenarios_file() -> Path:
+    candidates = [
+        Path(__file__).resolve().parent / "sample_scenarios.json",
+        Path(getattr(sys, "_MEIPASS", "")) / "racon" / "scenarios" / "sample_scenarios.json",
+        Path.cwd() / "racon" / "scenarios" / "sample_scenarios.json",
+    ]
+    for p in candidates:
+        if p and p.exists():
+            return p
+    return Path(__file__).resolve().parent / "sample_scenarios.json"
+
+_SCENARIOS_FILE = _resolve_scenarios_file()
 
 # Maps JSON string values to enums
 _STATUS_MAP = {

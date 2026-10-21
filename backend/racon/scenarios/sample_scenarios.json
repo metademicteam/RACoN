@@ -1,0 +1,227 @@
+[
+  {
+    "name": "Single Feasible Worker",
+    "description": "One available simulated worker with adequate resources",
+    "model_partition_required_mb": 2048,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-01",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cpu",
+        "ram_total_mb": 16384,
+        "ram_available_mb": 8192,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 25.0,
+        "network_latency_ms": null,
+        "current_workload_pct": 10.0,
+        "compatible_runtimes": ["cpu", "onnx"]
+      }
+    ]
+  },
+  {
+    "name": "Multiple Feasible Candidates",
+    "description": "Three workers with varying capabilities - tests scoring and ranking",
+    "model_partition_required_mb": 2048,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-01",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cpu",
+        "ram_total_mb": 16384,
+        "ram_available_mb": 8192,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 25.0,
+        "network_latency_ms": 5.0,
+        "current_workload_pct": 15.0,
+        "compatible_runtimes": ["cpu", "onnx"]
+      },
+      {
+        "worker_id": "SIM-WORKER-02",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cuda",
+        "ram_total_mb": 32768,
+        "ram_available_mb": 24576,
+        "accelerator_memory_mb": 8192,
+        "processing_speed_tps": 120.0,
+        "network_latency_ms": 12.0,
+        "current_workload_pct": 30.0,
+        "compatible_runtimes": ["cpu", "cuda", "onnx"]
+      },
+      {
+        "worker_id": "SIM-WORKER-03",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cpu",
+        "ram_total_mb": 65536,
+        "ram_available_mb": 50000,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 50.0,
+        "network_latency_ms": 2.0,
+        "current_workload_pct": 5.0,
+        "compatible_runtimes": ["cpu", "onnx"]
+      }
+    ]
+  },
+  {
+    "name": "Insufficient Memory Worker",
+    "description": "Worker does not have enough RAM for the model partition",
+    "model_partition_required_mb": 8192,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-04",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cpu",
+        "ram_total_mb": 8192,
+        "ram_available_mb": 3072,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 20.0,
+        "network_latency_ms": null,
+        "current_workload_pct": 40.0,
+        "compatible_runtimes": ["cpu"]
+      }
+    ]
+  },
+  {
+    "name": "Incompatible Runtime Worker",
+    "description": "Worker has a CUDA device but the task requires MPS only",
+    "model_partition_required_mb": 4096,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-05",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cuda",
+        "ram_total_mb": 32768,
+        "ram_available_mb": 16384,
+        "accelerator_memory_mb": 8192,
+        "processing_speed_tps": 100.0,
+        "network_latency_ms": 10.0,
+        "current_workload_pct": 20.0,
+        "compatible_runtimes": ["mps"]
+      }
+    ]
+  },
+  {
+    "name": "High Latency Network",
+    "description": "Worker is available but has very high simulated network latency",
+    "model_partition_required_mb": 2048,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-06",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cpu",
+        "ram_total_mb": 32768,
+        "ram_available_mb": 16384,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 40.0,
+        "network_latency_ms": 500.0,
+        "current_workload_pct": 10.0,
+        "compatible_runtimes": ["cpu"]
+      },
+      {
+        "worker_id": "SIM-WORKER-07",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cpu",
+        "ram_total_mb": 16384,
+        "ram_available_mb": 8192,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 30.0,
+        "network_latency_ms": 2.0,
+        "current_workload_pct": 25.0,
+        "compatible_runtimes": ["cpu"]
+      }
+    ]
+  },
+  {
+    "name": "Busy Worker",
+    "description": "Worker is at full capacity",
+    "model_partition_required_mb": 2048,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-08",
+        "is_simulated": true,
+        "status": "busy",
+        "device_type": "cpu",
+        "ram_total_mb": 16384,
+        "ram_available_mb": 4096,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 35.0,
+        "network_latency_ms": null,
+        "current_workload_pct": 100.0,
+        "compatible_runtimes": ["cpu"]
+      }
+    ]
+  },
+  {
+    "name": "Unavailable Worker",
+    "description": "Worker is offline/unavailable",
+    "model_partition_required_mb": 2048,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-09",
+        "is_simulated": true,
+        "status": "unavailable",
+        "device_type": "cpu",
+        "ram_total_mb": 16384,
+        "ram_available_mb": 8192,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 30.0,
+        "network_latency_ms": null,
+        "current_workload_pct": 0.0,
+        "compatible_runtimes": ["cpu"]
+      }
+    ]
+  },
+  {
+    "name": "No Feasible Solution",
+    "description": "All workers fail validation - one insufficient memory, one incompatible, one unavailable",
+    "model_partition_required_mb": 16384,
+    "workers": [
+      {
+        "worker_id": "SIM-WORKER-10",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "cpu",
+        "ram_total_mb": 8192,
+        "ram_available_mb": 4096,
+        "accelerator_memory_mb": null,
+        "processing_speed_tps": 20.0,
+        "network_latency_ms": null,
+        "current_workload_pct": 50.0,
+        "compatible_runtimes": ["cpu"]
+      },
+      {
+        "worker_id": "SIM-WORKER-11",
+        "is_simulated": true,
+        "status": "unavailable",
+        "device_type": "cuda",
+        "ram_total_mb": 32768,
+        "ram_available_mb": 24576,
+        "accelerator_memory_mb": 8192,
+        "processing_speed_tps": 100.0,
+        "network_latency_ms": 5.0,
+        "current_workload_pct": 0.0,
+        "compatible_runtimes": ["cuda"]
+      },
+      {
+        "worker_id": "SIM-WORKER-12",
+        "is_simulated": true,
+        "status": "available",
+        "device_type": "mps",
+        "ram_total_mb": 65536,
+        "ram_available_mb": 32768,
+        "accelerator_memory_mb": 16384,
+        "processing_speed_tps": 80.0,
+        "network_latency_ms": 3.0,
+        "current_workload_pct": 10.0,
+        "compatible_runtimes": ["cuda"]
+      }
+    ]
+  }
+]
