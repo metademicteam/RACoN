@@ -138,3 +138,36 @@ def test_logs_endpoint(client):
     logs = r.json()
     assert isinstance(logs, list)
     assert len(logs) >= 1
+
+
+def test_openai_compatibility_models(client):
+    """Verify OpenAI-compatible /v1/models endpoint."""
+    r = client.get("/v1/models")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["object"] == "list"
+    assert len(data["data"]) >= 1
+    model_ids = [m["id"] for m in data["data"]]
+    assert "gemma-3-1b" in model_ids
+
+
+def test_openai_compatibility_chat_completions(client):
+    """Verify OpenAI-compatible /v1/chat/completions endpoint."""
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "gemma-3-1b",
+            "messages": [
+                {"role": "user", "content": "Hello RACoN!"}
+            ],
+            "max_tokens": 16,
+            "stream": False,
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["object"] == "chat.completion"
+    assert len(data["choices"]) == 1
+    assert data["choices"][0]["message"]["role"] == "assistant"
+    assert len(data["choices"][0]["message"]["content"]) > 0
+    assert "usage" in data

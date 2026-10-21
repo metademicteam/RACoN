@@ -24,6 +24,7 @@ from .routes_nodes import router as nodes_router
 from .routes_scheduler import router as scheduler_router
 from .routes_settings import router as settings_router
 from .routes_status import router as status_router
+from .routes_openai import router as openai_router
 from ..config import VERSION, settings
 from ..hardware import discover_hardware, get_lightweight_update
 from ..scheduler.laya_adapter import get_laya_adapter
@@ -222,6 +223,7 @@ def create_app() -> FastAPI:
     app.include_router(benchmarks_router)
     app.include_router(logs_router)
     app.include_router(settings_router)
+    app.include_router(openai_router)
 
     # Locate static assets
     base_file = Path(__file__).resolve()
