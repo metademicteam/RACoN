@@ -1,0 +1,14 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- F:\RACoN\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: F:\RACoN
+configfile: pyproject.toml
+plugins: anyio-4.15.1, platformdirs-4.13.5
+collecting ... collected 4 items
+
+tests/test_abuse_and_hardening.py::test_abuse_expired_invite_code PASSED [ 25%]
+tests/test_abuse_and_hardening.py::test_abuse_tampered_signature_rejected PASSED [ 50%]
+tests/test_abuse_and_hardening.py::test_abuse_invite_use_count_exhaustion PASSED [ 75%]
+tests/test_abuse_and_hardening.py::test_multi_worker_concurrency_and_timeout PASSED [100%]
+
+============================== 4 passed in 1.00s ==============================

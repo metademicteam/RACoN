@@ -1,136 +1,154 @@
 # RACoN — Detailed System Architecture
 
-**Document version:** 1.0  
-**Target baseline:** RACoN Lab v0.1.0  
-**Project direction:** Local-first scheduler prototype → private multi-computer compute cluster → production desktop application  
-**Primary development environment:** Windows 11, Python, PySide6, SQLite, optional Laya decision engine  
+**Document version:** 2.0  
+**Target baseline:** RACoN Production Desktop with Tailscale Funnel Coordinator  
+**Project direction:** Local-first scheduler prototype → private multi-computer compute cluster → production desktop product  
+**Primary development environment:** Windows 11, Python 3.12, PySide6, SQLite WAL, Laya decision engine, Tailscale Funnel  
 
 ---
 
 ## 1. Executive Summary
 
-RACoN (Resource-Aware Collaborative Network) coordinates compute resources across computers so supported AI workloads can be scheduled across heterogeneous machines. The RACoN Lab v0.1.0 application provides the verified local foundation:
-1. Real local hardware discovery (accurate CPU, RAM, process RSS; non-fabrication of GPU metrics for integrated Intel UHD 630).
-2. Deterministic candidate evaluation with hard feasibility constraints and multi-objective scoring.
-3. Optional Laya-assisted scheduling using the official typed decision engine (`typed-decisions`).
-4. Simulated worker scenarios explicitly labeled (`is_simulated=True`, `SIM-`).
-5. Native PySide6 Qt desktop interface (Dashboard, Scheduler Lab, History, Settings).
-6. SQLite WAL persistence with thread-safe connections, busy timeouts, and serialized writes.
+RACoN (Resource-Aware Collaborative Network) coordinates compute resources across computers so supported AI workloads can be scheduled across heterogeneous machines.
+The platform operates as a secure **hub-and-spoke distributed network**:
+- **Coordinator Host (Hub):** Sits behind Tailscale Funnel on port 443. Runs the deterministic multi-objective scheduler, optional Laya decision engine, node registry, task queue, and SQLite WAL database.
+- **Contributor / Requester PCs (Spokes):** Clean Windows 11 PCs running the native PySide6 desktop UI and a background worker agent. Makes **only outbound** HTTPS/WSS connections. No inbound ports, no Funnel, and no router configuration required.
 
-### Core Architecture Principle
-**The deterministic scheduler enforces correctness; Laya may advise among candidates that have already passed hard validation.** Laya is not the inference runtime, not the worker registry, and not a security boundary. It must never be allowed to choose an infeasible placement.
-
----
-
-## 2. Product Scope by Version
-
-| Capability | RACoN Lab v0.1 | Next Milestone | Future RACoN |
-|---|---|---|---|
-| Desktop UI | Native PySide6 (Qt) | Improve reliability & packaging | Retain PySide6 modular monolith |
-| Hardware discovery | Real local CPU/RAM; safe GPU handling | Capability snapshots and freshness | Worker-side telemetry on each participating PC |
-| Scheduler | Deterministic + Laya Advisor | Live worker registry and reservations | Resource-aware placement across actual nodes |
-| Laya | Optional local decision adapter (`typed-decisions`) | Verified live decisions & benchmark vs baseline | Optional advisor; deterministic fallback always available |
-| Worker candidates | Scenario JSON, explicitly simulated | One real local worker service; private LAN registration | Multiple authenticated workers |
-| Inference | Not implemented as distributed execution | Verified local runtime adapter (Ollama) | Real distributed model execution through a verified runtime |
-| Persistence | Local SQLite WAL with thread-local pooling | Migrations, backup/restore tests | Coordinator-owned metadata; local node state |
-| Networking | None required (local desktop) | Private network only | Authenticated, encrypted worker protocol |
-| Desktop installer | Development launch first | Reproducible standalone PyInstaller / Inno Setup | Versioned releases, upgrade & rollback support |
+### Core Architecture Principles
+1. **Deterministic Safety Invariant:** The deterministic scheduler enforces correctness and hard constraints. Laya advises strictly among pre-filtered feasible candidates (ADR-002).
+2. **Dual Listeners:** Worker control routes are published through Funnel on `127.0.0.1:<worker-port>`; administrative controls are bound strictly to a loopback-only port and **never** exposed to Funnel (ADR-006).
+3. **Control-Plane Funnel Scope:** Tailscale Funnel carries control-plane traffic only (< 64 KB) and small task results (< 256 KB). Model weights and activation tensors must **never** traverse Funnel (ADR-007, ADR-012).
+4. **Zero Arbitrary Code Execution:** Worker agents execute only allow-listed, structured task types (`TEXT_COMPLETION`, `BENCHMARK_PROBE`, `EMBEDDING`). No shell execution, `eval()`, or unpickling of Python objects.
+5. **Decoupled Agent Lifecycle:** The worker agent runs as an independent process with authenticated loopback IPC to the PySide6 UI (ADR-010).
 
 ---
 
-## 3. System Context
+## 2. Product Scope & Execution Modes
+
+Every task and result carries an explicit mode tag shown in the UI:
+- **`SIMULATED` (`SIM-`):** Synthetic candidates from JSON scenarios for lab testing.
+- **`LOCAL`:** Workload executed locally on the requester's own machine.
+- **`REMOTE_SINGLE_WORKER`:** Whole task placed on the best feasible authenticated remote worker over the control channel.
+- **`DISTRIBUTED_PIPELINE`:** Split-layer model execution crossing machines. **Restricted to high-speed private LAN only (never Funnel).** Multiple machines are never described as "one pooled RAM/VRAM space".
+
+---
+
+## 3. High-Level System Topology
 
 ```mermaid
 flowchart TB
-    USER[User / Developer]
-    UI[RACoN Lab Desktop\nPySide6 Native Qt]
-    LOCAL[Local RACoN Services]
-    LAYA[Laya Decision Engine\nOptional / Lazy]
-    DB[(Local SQLite Database\nWAL Mode)]
-    HW[Local Hardware APIs\npsutil / Windows Registry]
-    OLLAMA[Optional Local Inference Runtime\nOllama Adapter]
-    COORD[Future RACoN Coordinator]
-    W1[Future Worker Agent A]
-    W2[Future Worker Agent B]
-    RT[Verified Distributed Runtime]
+    subgraph SPOKE["Contributor / Requester PC (Clean Win 11 - Outbound Only)"]
+        UI["RACoN Desktop UI\n(PySide6 Native Qt)"]
+        IPC["Loopback IPC\n(127.0.0.1:<ipc-port> + Ephemeral Token)"]
+        AGENT["RACoN Agent\n(Background Worker Process)"]
+        KEYSTORE["Agent Key Store\n(Ed25519 in %LOCALAPPDATA%)"]
+        RUNTIME["Local Runtime\n(Ollama / Benchmark Probe)"]
 
-    USER --> UI
-    UI --> LOCAL
-    LOCAL --> LAYA
-    LOCAL --> DB
-    LOCAL --> HW
-    LOCAL -. optional local inference .-> OLLAMA
-    UI -. future cluster administration .-> COORD
-    COORD <--> W1
-    COORD <--> W2
-    W1 --> RT
-    W2 --> RT
-    RT --> COORD
+        UI <--> IPC
+        IPC <--> AGENT
+        AGENT <--> KEYSTORE
+        AGENT <--> RUNTIME
+    end
+
+    subgraph INTERNET["Public Internet & Tailscale Relay"]
+        FUNNEL["Tailscale Funnel Relay\n(Port 443 / HTTPS / WSS)"]
+    end
+
+    subgraph HUB["Coordinator Host (Operator PC / Server)"]
+        WORKER_API["Worker Ingress Listener\n(127.0.0.1:<worker-port> via Funnel)\n- /health, /enroll, /heartbeat, /tasks/*"]
+        ADMIN_API["Admin Control Listener\n(127.0.0.1:<admin-port> - LOOPBACK ONLY)\n- /admin/* (Approve, Revoke, Ingress Kill Switch)"]
+        
+        REGISTRY["Node Registry & Leases\n(Trust States: PENDING, APPROVED, REVOKED)"]
+        INVITES["Invite Code Manager\n(SHA-256 Hashed, Expiration, Usage Caps)"]
+        TASK_MGR["Task Dispatcher\n(Signed Envelopes, Idempotency)"]
+        SCHEDULER["Deterministic Scheduler\n+ Optional Laya Advisor"]
+        DB[("Coordinator SQLite WAL\n(Thread-Local, busy_timeout=5000)")]
+        POWER["Power Guard\n(Sleep Prevention)"]
+
+        WORKER_API --> REGISTRY
+        WORKER_API --> INVITES
+        WORKER_API --> TASK_MGR
+
+        ADMIN_API --> REGISTRY
+        ADMIN_API --> INVITES
+        ADMIN_API --> TASK_MGR
+        
+        TASK_MGR --> SCHEDULER
+        REGISTRY --> DB
+        TASK_MGR --> DB
+    end
+
+    AGENT == "Outbound HTTPS / WSS" ==> FUNNEL
+    FUNNEL == "Reverse Tunnel" ==> WORKER_API
 ```
-
-In v0.1, the operational scope is strictly the desktop, local services, Laya adapter, local hardware monitoring, and SQLite.
 
 ---
 
-## 4. Architectural Style: Modular Monolith
-
-RACoN Lab is organized as a **modular monolith** with clean package boundaries:
+## 4. Component Layout
 
 ```
 racon/
 ├── __init__.py
 ├── __main__.py               # Entrypoint: python -m racon
-├── app.py                    # Application bootstrap & lifecycle
-├── hardware/
+├── app.py                    # Application bootstrap
+├── agent/                    # Decoupled Worker Agent
 │   ├── __init__.py
-│   ├── discovery.py          # Real CPU, RAM, GPU detection
-│   └── models.py             # HardwareSnapshot, GpuInfo
+│   ├── crypto_store.py       # Ed25519 identity storage in AppData
+│   ├── worker.py             # Heartbeat, task claim & allow-listed execution
+│   └── ipc.py                # Loopback IPC server with ephemeral token
+├── coordinator/              # Coordinator Hub Services
+│   ├── __init__.py
+│   ├── registry.py           # Node registry & trust state machine
+│   ├── invites.py            # SHA-256 hashed invite code manager
+│   ├── tasks.py              # Signed task envelopes & idempotency cache
+│   ├── ingress.py            # PublicIngress port & Tailscale Funnel adapter
+│   ├── server.py             # Dual listeners (Worker API vs Admin API)
+│   └── power_guard.py        # Windows AC standby detection & sleep prevention
+├── core/
+│   ├── __init__.py
+│   ├── config.py             # Layered configuration & endpoint resolution
+│   └── update_manifest.py    # Signed update manifest validation
+├── hardware.py               # Hardware discovery (CPU/RAM/safe GPU fallback)
 ├── scheduler/
-│   ├── __init__.py
-│   ├── models.py             # WorkerCandidate, CandidateEvaluation, SchedulerResult
-│   ├── deterministic.py      # Hard validation & multi-objective scoring
-│   ├── laya_adapter.py       # Official Laya Router integration (lazy loaded)
-│   └── evaluation.py         # SchedulingEngine (Deterministic, Shadow, Assisted)
-├── services/
-│   ├── __init__.py
-│   ├── hardware_service.py   # Background telemetry poller (QThread)
-│   └── benchmark_service.py  # Background benchmark worker (QThread) with graceful cancel
+│   ├── deterministic.py      # Hard constraints & multi-objective placement
+│   ├── laya_adapter.py       # Official Laya typed-decisions router (lazy loaded)
+│   ├── evaluation.py         # Deterministic, Shadow, and Assisted engine
+│   └── models.py             # CandidateEvaluation, SchedulerResult
 ├── storage/
-│   ├── __init__.py
-│   ├── database.py           # Thread-local SQLite connection manager (WAL, busy_timeout=5000)
-│   ├── repository.py         # Thread-safe repository with write_lock
-│   └── models.py             # AuditEvent, BenchmarkRecord, SchedulerDecisionRecord
+│   ├── database.py           # SQLite WAL connection manager (busy_timeout=5000)
+│   ├── repository.py         # Serialized write transactions
+│   └── models.py             # AuditEvent, BenchmarkRecord
 ├── scenarios/
-│   ├── __init__.py
 │   ├── loader.py             # Bundle-safe scenario loader
-│   └── sample_scenarios.json # Standard evaluation scenarios
+│   └── sample_scenarios.json # Explicitly simulated candidate scenarios
 └── ui/
-    ├── __init__.py
-    ├── main_window.py        # QMainWindow with QTabWidget navigation & graceful closeEvent
-    ├── dashboard_view.py     # Real-time hardware telemetry display
-    ├── lab_view.py           # Interactive scheduler testing and candidate inspection
-    ├── history_view.py       # Benchmark history & decision log tables
-    ├── settings_view.py      # Configurable resource limits & Laya controls
-    └── components/
-        └── card.py           # Reusable styled UI card widgets
+    ├── main_window.py        # QMainWindow with QTabWidget navigation
+    ├── dashboard.py          # Real-time hardware telemetry display
+    ├── worker_panel.py       # Live worker state, enrollment, and controls
+    ├── scheduler_lab.py      # Interactive scenario testing
+    ├── benchmark_history.py  # Benchmark records & decision logs
+    └── settings.py           # Resource ceilings & Laya controls
+
+protocols/                    # Shared Typed Versioned Protocol Package
+├── __init__.py
+├── crypto.py                 # Ed25519 keypairs, signing, verification, SHA-256
+└── models.py                 # Pydantic v2 schemas for all network messages
 ```
 
 ---
 
-## 5. Architectural Decision Records (ADRs)
+## 5. Architectural Decision Records (ADRs) Summary
 
-### ADR-001: Native PySide6 Desktop Application
-- **Decision:** Keep the native PySide6 (Qt) modular monolith rather than Tauri/React.
-- **Rationale:** Avoids unnecessary multi-process overhead, inter-process serialization, and webview dependencies for a local-first computing tool. PySide6 provides direct native access to hardware threads and Python libraries without IPC complexity.
-
-### ADR-002: Deterministic Safety Invariant with Laya Advisory
-- **Decision:** All candidates must pass strict deterministic hard-constraint validation (RAM, device type, online status, busy check) before scoring.
-- **Rationale:** Neural or heuristic decision engines like Laya must never be allowed to select an infeasible worker. Laya serves purely as an advisor among pre-filtered feasible candidates. If Laya fails, times out, or selects an invalid candidate, the engine safely falls back to the deterministic best choice.
-
-### ADR-003: Thread-Safe SQLite WAL Concurrency
-- **Decision:** SQLite connections are isolated per-thread using `threading.local()` with `PRAGMA busy_timeout=5000` and `PRAGMA journal_mode=WAL`. Write operations are serialized via a threading mutex.
-- **Rationale:** Prevents `sqlite3.ProgrammingError: SQLite objects created in a thread can only be used in that same thread` when background QThreads record benchmark runs.
-
-### ADR-004: Lazy Laya Initialization
-- **Decision:** The Laya `Router` is never loaded on application startup. It initializes on demand only when the user explicitly triggers a Laya-assisted or Shadow scheduling evaluation.
-- **Rationale:** Preserves system RAM (~1.8 GB memory footprint on CPU) and keeps initial application launch instantaneous on modest hardware (Intel Core i3 / 16GB RAM).
+- **ADR-001**: Native PySide6 Desktop Application
+- **ADR-002**: Deterministic Safety Invariant with Laya Advisory
+- **ADR-003**: Thread-Safe SQLite WAL Concurrency
+- **ADR-004**: Lazy Laya Initialization
+- **ADR-005**: Hub-and-Spoke Topology via Coordinator Funnel Ingress
+- **ADR-006**: Dual Listeners on Coordinator (Public Worker API vs. Loopback Admin API)
+- **ADR-007**: Funnel Scope Limited to Control-Plane Traffic and Small Payloads
+- **ADR-008**: Public Ingress Port Abstraction (`PublicIngress`)
+- **ADR-009**: Invite-Only Enrollment with Mandatory Operator Approval
+- **ADR-010**: Decoupled Worker Agent Process with Authenticated Loopback IPC
+- **ADR-011**: Configurable Coordinator Endpoint Resolution
+- **ADR-012**: Distributed Pipeline Inference Boundary & Private LAN Restriction
+- **ADR-013**: Windows Per-User Installer Packaging via Inno Setup

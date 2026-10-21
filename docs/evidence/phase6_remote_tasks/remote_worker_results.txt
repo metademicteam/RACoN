@@ -1,0 +1,13 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- F:\RACoN\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: F:\RACoN
+configfile: pyproject.toml
+plugins: anyio-4.15.1, platformdirs-4.13.5
+collecting ... collected 3 items
+
+tests/test_remote_single_worker.py::test_remote_single_worker_execution_and_mode_tag PASSED [ 33%]
+tests/test_remote_single_worker.py::test_cancellation_enforcement_never_reports_success PASSED [ 66%]
+tests/test_remote_single_worker.py::test_idempotency_key_deduplication PASSED [100%]
+
+============================== 3 passed in 4.11s ==============================

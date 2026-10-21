@@ -21,6 +21,7 @@ from racon.ui.dashboard import DashboardPanel
 from racon.ui.scheduler_lab import SchedulerLabPanel
 from racon.ui.benchmark_history import BenchmarkHistoryPanel
 from racon.ui.settings import SettingsPanel
+from racon.ui.worker_panel import WorkerAgentPanel
 from racon.ui.styles import DARK_STYLESHEET
 
 logger = logging.getLogger(__name__)
@@ -63,8 +64,10 @@ class MainWindow(QMainWindow):
         self._scheduler_lab = SchedulerLabPanel()
         self._history = BenchmarkHistoryPanel()
         self._settings = SettingsPanel()
+        self._worker_panel = WorkerAgentPanel()
 
         self._tabs.addTab(self._dashboard, "📊 Dashboard")
+        self._tabs.addTab(self._worker_panel, "🖥 Worker Agent")
         self._tabs.addTab(self._scheduler_lab, "🔬 Scheduler Lab")
         self._tabs.addTab(self._history, "📈 History")
         self._tabs.addTab(self._settings, "⚙ Settings")
@@ -208,6 +211,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Clean up on close."""
         logger.info("RACoN Lab closing")
+        if hasattr(self, "_worker_panel"):
+            self._worker_panel.closeEvent(event)
         self._monitoring.stop()
         if hasattr(self._benchmark_service, "cancel_or_wait"):
             self._benchmark_service.cancel_or_wait()

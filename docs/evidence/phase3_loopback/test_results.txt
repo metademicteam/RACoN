@@ -1,0 +1,16 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.12.3, pytest-9.1.1, pluggy-1.7.0 -- F:\RACoN\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: F:\RACoN
+configfile: pyproject.toml
+plugins: anyio-4.15.1, platformdirs-4.13.5
+collecting ... collected 6 items
+
+tests/test_protocols.py::test_crypto_keypair_generation_and_signatures PASSED [ 16%]
+tests/test_protocols.py::test_enrollment_request_serialization_and_signature PASSED [ 33%]
+tests/test_protocols.py::test_task_envelope_signed_by_coordinator PASSED [ 50%]
+tests/test_protocols.py::test_task_size_limits PASSED                    [ 66%]
+tests/test_coordinator_and_agent.py::test_adr006_dual_listeners_admin_routes_404_on_worker_api PASSED [ 83%]
+tests/test_coordinator_and_agent.py::test_full_coordinator_agent_loopback_lifecycle PASSED [100%]
+
+============================== 6 passed in 3.88s ==============================
