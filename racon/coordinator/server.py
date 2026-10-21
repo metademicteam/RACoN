@@ -32,6 +32,7 @@ def create_worker_api(
     registry: NodeRegistry,
     invites: InviteManager,
     tasks: TaskManager,
+    auto_approve: bool = False,
 ) -> FastAPI:
     """Create the Worker-facing FastAPI application (published via Funnel).
     
@@ -67,7 +68,7 @@ def create_worker_api(
         # 1. Validate invite code
         is_valid = invites.validate_and_consume(req.invite_code)
         # 2. Process enrollment through node registry
-        resp = registry.register_node(req, is_invite_valid=is_valid, auto_approve=False)
+        resp = registry.register_node(req, is_invite_valid=is_valid, auto_approve=auto_approve)
         return resp
 
     @app.post("/heartbeat", response_model=HeartbeatAck)
@@ -215,3 +216,130 @@ def create_admin_api(
         return report.model_dump()
 
     return app
+
+
+def run_coordinator(
+    worker_host: str = "0.0.0.0",
+    worker_port: int = 8765,
+    admin_port: int = 8766,
+    auto_approve: bool = True,
+    enable_funnel: bool = False,
+) -> None:
+    """Run dual-listener coordinator servers."""
+    import sys
+    import threading
+    import uvicorn
+    from pathlib import Path
+    from protocols.crypto import (
+        generate_keypair,
+        private_key_to_bytes,
+        load_private_key_from_bytes,
+        public_key_to_hex,
+    )
+    from racon.coordinator.power_guard import CoordinatorPowerGuard
+    from racon.config import get_data_dir
+
+    # 1. Power guard check
+    power_guard = CoordinatorPowerGuard()
+    power_guard.check_power_plan()
+
+    # 2. Key management (load or persist)
+    key_dir = get_data_dir()
+    key_dir.mkdir(parents=True, exist_ok=True)
+    key_file = key_dir / "coordinator_key.bin"
+
+    if key_file.exists():
+        try:
+            priv_bytes = key_file.read_bytes()
+            coord_priv = load_private_key_from_bytes(priv_bytes)
+            coord_pub = coord_priv.public_key()
+            logger.info("Loaded coordinator identity key from %s", key_file)
+        except Exception as e:
+            logger.warning("Failed to load existing key: %s, generating new keypair", e)
+            coord_priv, coord_pub = generate_keypair()
+            key_file.write_bytes(private_key_to_bytes(coord_priv))
+    else:
+        coord_priv, coord_pub = generate_keypair()
+        key_file.write_bytes(private_key_to_bytes(coord_priv))
+        logger.info("Generated new coordinator identity key at %s", key_file)
+
+    coord_pub_hex = public_key_to_hex(coord_pub)
+
+    # 3. Instantiate coordinator components
+    registry = NodeRegistry(coordinator_public_key_hex=coord_pub_hex)
+    invites = InviteManager()
+    tasks = TaskManager(coordinator_private_key=coord_priv)
+    ingress = TailscaleFunnelIngress()
+
+    if enable_funnel:
+        ingress.enable(local_port=worker_port, public_port=443)
+
+    ingress_status = ingress.get_status()
+
+    # 4. Generate initial invite code
+    init_invite = invites.create_invite(max_uses=20, expiry_hours=72.0)
+
+    # 5. Build FastAPI apps
+    worker_app = create_worker_api(registry=registry, invites=invites, tasks=tasks, auto_approve=auto_approve)
+    admin_app = create_admin_api(registry=registry, invites=invites, tasks=tasks, ingress=ingress)
+
+    # 6. Display banner
+    public_url = ingress_status.public_url or "https://desktop-b7l73cl.tail6cb521.ts.net"
+    print("\n" + "=" * 76)
+    print("  🚀 RACoN Coordinator — Cluster Management Service")
+    print("=" * 76)
+    print(f"  Worker Ingress (Local):   http://{worker_host}:{worker_port}")
+    print(f"  Public Tailscale Funnel:  {public_url}")
+    print(f"  Admin Control (Loopback): http://127.0.0.1:{admin_port}")
+    print(f"  Coordinator Identity:     {coord_pub_hex[:16]}...{coord_pub_hex[-8:]}")
+    print(f"  Auto-Approve Workers:     {'ENABLED' if auto_approve else 'DISABLED (manual approval)'}")
+    print("-" * 76)
+    print(f"  🔑 ACTIVE INVITE CODE:     {init_invite}")
+    print("=" * 76)
+    print("  INSTRUCTIONS FOR REMOTE USERS:")
+    print("  1. Download & run the installer on the remote PC:")
+    print("     RACoN_Setup_v0.1.0.exe")
+    print("  2. Open RACoN -> Click the '🖥 Worker Agent' tab")
+    print(f"  3. In Coordinator URL, enter:")
+    print(f"     {public_url}")
+    print(f"  4. In Invite Code, enter:")
+    print(f"     {init_invite}")
+    print("  5. Click 'Enroll Node', then click 'Start Worker'")
+    print("=" * 76 + "\n", flush=True)
+
+    # 7. Start both servers
+    def run_worker():
+        uvicorn.run(worker_app, host=worker_host, port=worker_port, log_level="info")
+
+    def run_admin():
+        uvicorn.run(admin_app, host="127.0.0.1", port=admin_port, log_level="warning")
+
+    t_admin = threading.Thread(target=run_admin, daemon=True)
+    t_admin.start()
+
+    run_worker()
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="RACoN Dual-Listener Coordinator Server")
+    parser.add_argument("--worker-host", default="0.0.0.0", help="Worker API bind address (default: 0.0.0.0)")
+    parser.add_argument("--worker-port", type=int, default=8765, help="Worker API port (default: 8765)")
+    parser.add_argument("--admin-port", type=int, default=8766, help="Admin API port (default: 8766)")
+    parser.add_argument("--auto-approve", action="store_true", default=True, help="Automatically approve workers with valid invite codes (default: True)")
+    parser.add_argument("--manual-approve", dest="auto_approve", action="store_false", help="Require manual operator approval for workers")
+    parser.add_argument("--enable-funnel", action="store_true", default=False, help="Enable Tailscale Funnel on startup")
+    args = parser.parse_args()
+
+    run_coordinator(
+        worker_host=args.worker_host,
+        worker_port=args.worker_port,
+        admin_port=args.admin_port,
+        auto_approve=args.auto_approve,
+        enable_funnel=args.enable_funnel,
+    )
+
+
+if __name__ == "__main__":
+    main()
+
