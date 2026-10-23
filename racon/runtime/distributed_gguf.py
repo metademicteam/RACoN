@@ -62,6 +62,7 @@ class ShardInfo:
     layer_start: int
     layer_end: int
     min_ram_mb: float
+    download_url: Optional[str] = None
 
 
 @dataclass
@@ -74,6 +75,7 @@ class GgufShardManifest:
     original_sha256: str
     split_strategy: str
     created_at: float
+    hf_repo_id: Optional[str] = None
     shards: List[ShardInfo] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -81,8 +83,9 @@ class GgufShardManifest:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> GgufShardManifest:
-        shards_data = data.pop("shards", [])
-        manifest = cls(**data)
+        data_copy = dict(data)
+        shards_data = data_copy.pop("shards", [])
+        manifest = cls(**data_copy)
         manifest.shards = [ShardInfo(**s) for s in shards_data]
         return manifest
 
@@ -275,3 +278,193 @@ def verify_shard(file_path: str, expected_sha256: str) -> bool:
         return False
     actual_sha = compute_file_sha256(file_path)
     return actual_sha.lower() == expected_sha256.lower()
+
+
+def load_manifest(manifest_path_or_dir: str) -> Optional[GgufShardManifest]:
+    """Load and parse a shards_manifest.json from a file or directory."""
+    p = Path(manifest_path_or_dir)
+    if p.is_dir():
+        p = p / "shards_manifest.json"
+    if not p.exists():
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return GgufShardManifest.from_dict(data)
+    except Exception as e:
+        logger.error("Failed to load shard manifest from %s: %s", p, e)
+        return None
+
+
+def select_optimal_shard(
+    manifest: GgufShardManifest,
+    available_ram_mb: float,
+    is_master: bool = False,
+) -> ShardInfo:
+    """Select the optimal model shard based on host role and memory ceiling.
+    
+    In a 2-node pipeline:
+    - Master / Coordinator holds Shard 1 (layers 0..12 + embeddings).
+    - Worker RPC nodes hold Shard 2 (layers 13..25 + attention & head).
+    If multiple shards exist, worker nodes select the shard matching available RAM.
+    """
+    if not manifest.shards:
+        raise ValueError("Manifest contains no shards.")
+
+    if is_master:
+        # Master node holds the first shard (embeddings & early layers)
+        return manifest.shards[0]
+
+    # For worker nodes: filter candidate shards that fit within available RAM
+    candidates = [s for s in manifest.shards[1:] if s.min_ram_mb <= available_ram_mb]
+    if candidates:
+        # Pick the most capable shard that fits comfortably
+        return candidates[0]
+
+    # If RAM is constrained, pick the shard with the smallest min_ram_mb requirement
+    return min(manifest.shards, key=lambda s: s.min_ram_mb)
+
+
+def download_shard(
+    shard: ShardInfo,
+    dest_dir: str,
+    progress_callback: Optional[Any] = None,
+) -> str:
+    """Download and verify a shard from Hugging Face Hub or direct download URL.
+    
+    Verifies SHA-256 before declaring ready.
+    """
+    import httpx
+    dest = Path(dest_dir)
+    dest.mkdir(parents=True, exist_ok=True)
+    target_file = dest / shard.filename
+
+    # If already exists and valid, skip download
+    if target_file.exists() and verify_shard(str(target_file), shard.sha256):
+        logger.info("Shard %s already exists and verified via SHA-256.", shard.filename)
+        return str(target_file)
+
+    # Determine URL
+    url = shard.download_url
+    if not url:
+        repo_id = "toriqulhaque/RACoN-Gemma-3-1B-Shards"
+        url = f"https://huggingface.co/{repo_id}/resolve/main/{shard.filename}"
+
+    logger.info("Downloading shard %s from %s (%d bytes)...", shard.filename, url, shard.file_size_bytes)
+    tmp_file = dest / f"{shard.filename}.tmp"
+    h = hashlib.sha256()
+    downloaded_bytes = 0
+
+    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as resp:
+        if resp.status_code != 200:
+            raise RuntimeError(f"Failed to download shard: HTTP {resp.status_code} from {url}")
+        total = int(resp.headers.get("Content-Length", shard.file_size_bytes))
+        with open(tmp_file, "wb") as f:
+            for chunk in resp.iter_bytes(chunk_size=1024 * 512):
+                if chunk:
+                    f.write(chunk)
+                    h.update(chunk)
+                    downloaded_bytes += len(chunk)
+                    if progress_callback:
+                        progress_callback(downloaded_bytes, total)
+
+    actual_sha = h.hexdigest()
+    if actual_sha.lower() != shard.sha256.lower():
+        if tmp_file.exists():
+            tmp_file.unlink()
+        raise ValueError(
+            f"SHA-256 integrity check failed for {shard.filename}! Expected {shard.sha256}, got {actual_sha}"
+        )
+
+    # Atomically replace target
+    if target_file.exists():
+        target_file.unlink()
+    tmp_file.rename(target_file)
+    logger.info("Shard %s downloaded and SHA-256 verified successfully.", shard.filename)
+    return str(target_file)
+
+
+def ensure_worker_shard(
+    manifest_source: Optional[str] = None,
+    available_ram_mb: float = 4096.0,
+    is_master: bool = False,
+    target_dir: Optional[str] = None,
+    progress_callback: Optional[Any] = None,
+) -> Tuple[ShardInfo, str]:
+    """Discover, select, download, and verify the optimal layer shard for this worker.
+    
+    Returns (ShardInfo, verified_file_path).
+    """
+    import time
+    from racon.config import get_data_dir
+
+    # Search for local manifest or use default bundled path
+    manifest: Optional[GgufShardManifest] = None
+    search_paths = []
+    if manifest_source:
+        search_paths.append(manifest_source)
+    search_paths.extend([
+        "models/shards/gemma-3-1b/shards_manifest.json",
+        str(get_data_dir() / "models" / "shards" / "gemma-3-1b" / "shards_manifest.json"),
+    ])
+
+    for sp in search_paths:
+        manifest = load_manifest(sp)
+        if manifest:
+            break
+
+    if not manifest:
+        # Fallback to default remote Hugging Face manifest definition
+        manifest = GgufShardManifest(
+            model_name="gemma-3-1b",
+            architecture="gemma3",
+            total_layers=26,
+            total_tensors=340,
+            original_file_size=806059360,
+            original_sha256="fcd05a80d8f617383259bf674729d35392664829ff9e467600b5392e11212d8c",
+            split_strategy="size_450MB",
+            created_at=time.time(),
+            hf_repo_id="toriqulhaque/RACoN-Gemma-3-1B-Shards",
+            shards=[
+                ShardInfo(
+                    shard_index=1,
+                    total_shards=2,
+                    filename="gemma-3-1b-split.gguf-00001-of-00002.gguf",
+                    file_path="",
+                    download_url="https://huggingface.co/toriqulhaque/RACoN-Gemma-3-1B-Shards/resolve/main/gemma-3-1b-split.gguf-00001-of-00002.gguf",
+                    file_size_bytes=451855520,
+                    sha256="873135c360e50b1c72aa2e3ac828dd8bfdf5c802517e69e19167684f8ac20b16",
+                    tensor_count=90,
+                    layer_start=0,
+                    layer_end=12,
+                    min_ram_mb=542.2,
+                ),
+                ShardInfo(
+                    shard_index=2,
+                    total_shards=2,
+                    filename="gemma-3-1b-split.gguf-00002-of-00002.gguf",
+                    file_path="",
+                    download_url="https://huggingface.co/toriqulhaque/RACoN-Gemma-3-1B-Shards/resolve/main/gemma-3-1b-split.gguf-00002-of-00002.gguf",
+                    file_size_bytes=354204064,
+                    sha256="5ade62cc0e9e222248a9b6a9b7d98b821f9ffa9e38348a588fce62140f1ea538",
+                    tensor_count=250,
+                    layer_start=13,
+                    layer_end=25,
+                    min_ram_mb=425.0,
+                ),
+            ],
+        )
+
+    shard = select_optimal_shard(manifest, available_ram_mb=available_ram_mb, is_master=is_master)
+
+    # Destination directory
+    if not target_dir:
+        # Check if local repo folder exists
+        local_repo_shard = Path("models/shards/gemma-3-1b") / shard.filename
+        if local_repo_shard.exists() and verify_shard(str(local_repo_shard), shard.sha256):
+            return shard, str(local_repo_shard.resolve())
+        target_dir = str(get_data_dir() / "models" / "shards" / "gemma-3-1b")
+
+    path = download_shard(shard, target_dir, progress_callback=progress_callback)
+    return shard, path
+

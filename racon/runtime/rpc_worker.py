@@ -193,19 +193,20 @@ class DistributedPipelineEngine:
                 mode="FAILED",
             )
 
-        rpc_arg = ",".join(rpc_endpoints)
         cmd = [
             self.cli_bin,
             "-m", model_path,
-            "--rpc", rpc_arg,
             "-ngl", str(n_gpu_layers),
-            "-sm", split_mode,
             "-p", prompt,
             "-n", str(max_tokens),
             "--no-warmup",
             "--single-turn",
             "-t", str(threads),
         ]
+
+        if rpc_endpoints:
+            rpc_arg = ",".join(rpc_endpoints)
+            cmd.extend(["--rpc", rpc_arg, "-sm", split_mode])
 
         if tensor_split:
             ts_str = ",".join(str(x) for x in tensor_split)

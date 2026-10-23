@@ -82,6 +82,14 @@ class WorkerAgentPanel(QWidget):
         self._run_state_label.setStyleSheet("font-weight: bold; color: #E57373;")
         status_form.addRow("Worker Execution:", self._run_state_label)
 
+        self._shard_label = QLabel("Auto-select on Start")
+        self._shard_label.setStyleSheet("color: #89b4fa; font-size: 12px;")
+        status_form.addRow("Model Layer Shard:", self._shard_label)
+
+        self._rpc_label = QLabel("Inactive")
+        self._rpc_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
+        status_form.addRow("RPC Worker Service:", self._rpc_label)
+
         layout.addWidget(status_group)
 
         # Coordinator Connection & Enrollment Group
@@ -186,6 +194,22 @@ class WorkerAgentPanel(QWidget):
             f"{status['active_tasks_count']} active"
         )
 
+        shard_desc = status.get("assigned_shard")
+        if shard_desc:
+            self._shard_label.setText(shard_desc)
+            self._shard_label.setStyleSheet("color: #a6e3a1; font-weight: bold; font-size: 12px;")
+        else:
+            self._shard_label.setText("Auto-select on Start")
+            self._shard_label.setStyleSheet("color: #89b4fa; font-size: 12px;")
+
+        rpc_end = status.get("rpc_endpoint")
+        if rpc_end:
+            self._rpc_label.setText(f"● Active ({rpc_end})")
+            self._rpc_label.setStyleSheet("color: #a6e3a1; font-weight: bold; font-size: 12px;")
+        else:
+            self._rpc_label.setText("Inactive")
+            self._rpc_label.setStyleSheet("color: #a6adc8; font-size: 12px;")
+
         if status["last_heartbeat_time"] > 0:
             ago = int(time.time() - status["last_heartbeat_time"])
             self._last_hb_label.setText(f"{ago}s ago")
@@ -222,9 +246,22 @@ class WorkerAgentPanel(QWidget):
         self._refresh_status()
 
     def _on_start_clicked(self):
+        import threading
         self._agent.coordinator_url = self._coord_input.text().strip()
-        self._agent.start()
-        self._append_log("Worker started. Emitting heartbeats and polling for tasks.")
+        self._append_log("Starting worker: preparing hardware and checking layer shard...")
+        self._start_btn.setEnabled(False)
+
+        def _worker_startup():
+            def _progress(dl, total):
+                if total > 0 and (dl % (1024 * 1024 * 25) < (1024 * 512) or dl >= total):
+                    pct = (dl / total) * 100
+                    self._append_log(f"📥 Downloading layer shard from Hugging Face: {dl / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB ({pct:.0f}%)")
+
+            ok, msg = self._agent.prepare_and_start_rpc_worker(progress_callback=_progress)
+            self._agent.start()
+            self._append_log(f"Worker status: {msg}")
+
+        threading.Thread(target=_worker_startup, daemon=True).start()
         self._refresh_status()
 
     def _on_stop_clicked(self):

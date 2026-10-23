@@ -223,3 +223,45 @@ def test_distributed_layer_inference_e2e():
         assert len(result.memory_breakdown) > 0
     finally:
         rpc.stop()
+
+
+def test_select_optimal_shard():
+    """Verify optimal layer selection based on node role and memory constraints."""
+    from racon.runtime.distributed_gguf import select_optimal_shard, load_manifest
+    manifest = load_manifest(SHARDS_DIR)
+    assert manifest is not None
+    assert manifest.hf_repo_id == "toriqulhaque/RACoN-Gemma-3-1B-Shards"
+
+    # Master node gets Shard 1 (embeddings + early layers)
+    master_shard = select_optimal_shard(manifest, available_ram_mb=8192.0, is_master=True)
+    assert master_shard.shard_index == 1
+    assert master_shard.layer_start == 0
+
+    # Worker node gets Shard 2 (late layers + head)
+    worker_shard = select_optimal_shard(manifest, available_ram_mb=4096.0, is_master=False)
+    assert worker_shard.shard_index == 2
+    assert worker_shard.layer_start == 13
+
+
+def test_ensure_worker_shard():
+    """Verify discovering and resolving the worker shard from local cache or manifest."""
+    from racon.runtime.distributed_gguf import ensure_worker_shard
+    shard, path = ensure_worker_shard(manifest_source=SHARDS_DIR, available_ram_mb=4096.0, is_master=False)
+    assert shard.shard_index == 2
+    assert os.path.isfile(path)
+
+
+def test_agent_prepare_and_start_rpc_worker():
+    """Verify worker agent prepares shard and starts RPC server."""
+    agent = RaconAgent(node_id_override="test-shard-worker")
+    port = 50062
+    ok, msg = agent.prepare_and_start_rpc_worker(host="127.0.0.1", port=port, threads=2)
+    try:
+        assert ok is True
+        assert agent.rpc_endpoint == f"127.0.0.1:{port}"
+        status = agent.get_status()
+        assert status["assigned_shard"] is not None
+        assert "gemma-3-1b-split.gguf-00002" in status["assigned_shard"]
+    finally:
+        agent.stop_rpc_worker()
+

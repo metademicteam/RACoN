@@ -81,6 +81,8 @@ class RaconAgent:
         self._worker_thread: Optional[threading.Thread] = None
         self.rpc_server: Optional[Any] = None
         self.rpc_endpoint: Optional[str] = None
+        self.assigned_shard: Optional[Any] = None
+        self.assigned_shard_path: Optional[str] = None
 
     def enroll(self, invite_code: str) -> bool:
         """Enroll with coordinator using an invite code."""
@@ -371,6 +373,42 @@ class RaconAgent:
         self._worker_thread = threading.Thread(target=_loop, daemon=True, name="RACoNAgentWorker")
         self._worker_thread.start()
 
+    def prepare_and_start_rpc_worker(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 50052,
+        threads: int = 4,
+        progress_callback: Optional[Any] = None,
+    ) -> tuple[bool, str]:
+        """Discover, download, and verify the optimal layer shard, then start rpc-server."""
+        from racon.runtime.distributed_gguf import ensure_worker_shard
+        from racon.hardware import discover_hardware
+
+        try:
+            hw = discover_hardware()
+            avail_ram = hw.ram_available_mb
+            logger.info("Preparing worker layer shard with available RAM: %.1f MB", avail_ram)
+
+            shard, shard_path = ensure_worker_shard(
+                available_ram_mb=avail_ram,
+                is_master=False,
+                progress_callback=progress_callback,
+            )
+            self.assigned_shard = shard
+            self.assigned_shard_path = shard_path
+
+            ok = self.start_rpc_worker(host=host, port=port, threads=threads)
+            if ok:
+                msg = f"Shard {shard.shard_index}/{shard.total_shards} ({shard.filename}) verified. RPC listening on {self.rpc_endpoint}."
+                logger.info(msg)
+                return True, msg
+            else:
+                return False, "Failed to launch native rpc-server process."
+        except Exception as e:
+            err = f"Failed to prepare worker layer shard: {e}"
+            logger.error(err)
+            return False, err
+
     def start_rpc_worker(self, host: str = "0.0.0.0", port: int = 50052, threads: int = 4) -> bool:
         """Start the native llama.cpp RPC server for remote layer execution."""
         from racon.runtime.rpc_worker import RpcServerProcess
@@ -404,6 +442,10 @@ class RaconAgent:
         self.status.is_paused = False
 
     def get_status(self) -> dict:
+        shard_desc = None
+        if self.assigned_shard:
+            shard_desc = f"{self.assigned_shard.filename} (Layers {self.assigned_shard.layer_start}-{self.assigned_shard.layer_end})"
+
         return {
             "node_id": self.status.node_id,
             "public_key_hex": self.status.public_key_hex,
@@ -417,4 +459,6 @@ class RaconAgent:
             "last_heartbeat_time": self.status.last_heartbeat_time,
             "last_error": self.status.last_error,
             "rpc_endpoint": self.rpc_endpoint,
+            "assigned_shard": shard_desc,
+            "assigned_shard_path": self.assigned_shard_path,
         }
