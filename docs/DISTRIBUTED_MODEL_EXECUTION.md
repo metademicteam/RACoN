@@ -109,6 +109,13 @@ Each shard is cataloged in [`models/shards/gemma-3-1b/shards_manifest.json`](fil
 
 ---
 
+> **Update (current implementation):** Layer placement is now measured and planned by
+> `racon/cluster/planner.py` and `racon/cluster/supervisor.py`. Each device's share is proportional to its
+> free memory as reported by llama.cpp, and a dropped worker's layers fall back to the head. The full model
+> stays on the head, so no Hugging Face download happens during an outage. See
+> [CLUSTER_LAYER_SCHEDULING.md](CLUSTER_LAYER_SCHEDULING.md). Sections 2 and 3 below describe the earlier
+> shard-based design and are kept for reference.
+
 ## 3. How Model Weights are Shared Across Nodes
 
 In RACoN, model weights are distributed using two supported delivery modes depending on network topology:

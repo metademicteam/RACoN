@@ -1,0 +1,24 @@
+# Cloudflare Tunnel ingress for racon.metademic.org
+#
+# Copy this file to %USERPROFILE%\.cloudflared\config.yml after `cloudflared tunnel create racon`.
+# Replace <TUNNEL_UUID> with the id printed by that command.
+#
+# Routing:
+#   /v1/*, /health  -> API gateway on 127.0.0.1:8000 (auth, rate limits and path allow-list live there)
+#   everything else -> website container on 127.0.0.1:8080 (static site + installer downloads)
+#
+# The gateway and website bind to loopback only. The tunnel is the only public entry point.
+
+tunnel: d339eb37-f6e0-4052-bed6-fb99de11bbc7
+credentials-file: C:\Users\Haque\.cloudflared\d339eb37-f6e0-4052-bed6-fb99de11bbc7.json
+
+ingress:
+  - hostname: racon.metademic.org
+    path: ^/v1/.*
+    service: http://127.0.0.1:8000
+  - hostname: racon.metademic.org
+    path: ^/health$
+    service: http://127.0.0.1:8000
+  - hostname: racon.metademic.org
+    service: http://127.0.0.1:8081
+  - service: http_status:404

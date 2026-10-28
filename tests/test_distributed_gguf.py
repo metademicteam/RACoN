@@ -200,7 +200,7 @@ def test_distributed_layer_inference_e2e():
     if not os.path.exists(MODEL_PATH):
         pytest.skip(f"Model file not present at {MODEL_PATH}")
 
-    port = 50060
+    port = 50900  # 50060-50159 is reserved by Windows on this host
     rpc = RpcServerProcess(host="127.0.0.1", port=port, threads=4, enable_cache=False)
     started = rpc.start()
     assert started is True
@@ -254,7 +254,7 @@ def test_ensure_worker_shard():
 def test_agent_prepare_and_start_rpc_worker():
     """Verify worker agent prepares shard and starts RPC server."""
     agent = RaconAgent(node_id_override="test-shard-worker")
-    port = 50062
+    port = 50900  # 50060-50159 is reserved by Windows on this host; 50062 cannot bind
     ok, msg = agent.prepare_and_start_rpc_worker(host="127.0.0.1", port=port, threads=2)
     try:
         assert ok is True

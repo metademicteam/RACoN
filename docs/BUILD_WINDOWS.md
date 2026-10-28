@@ -58,8 +58,26 @@ It automatically detects `dist\RACoN_Desktop\RACoN_Desktop.exe` and launches the
    - Real-time download progress bars with percentage and transfer speed.
    - Live CPU-friendly inference playground.
 
-4. **Global Sharing via Tailscale Funnel**:
-   - Shareable with anyone via `https://desktop-b7l73cl.tail6cb521.ts.net`.
+4. **Public Website and Installer**:
+   - Project site and installer download: `https://racon.metademic.org` (Cloudflare Tunnel from this PC; see
+     [WEBSITE_CLOUDFLARE.md](WEBSITE_CLOUDFLARE.md)).
+   - Tailscale Funnel address (`https://desktop-b7l73cl.tail6cb521.ts.net`) is still available for the coordinator.
+
+## 5. Building the Installer and Publishing It
+
+```powershell
+# 1. Rebuild the one-folder app (dist\RACoN\RACoN.exe)
+.\.venv\Scripts\pyinstaller.exe RACoN.spec --noconfirm --clean
+
+# 2. Compile the Inno Setup installer (Inno Setup 6 is required)
+& "C:\Users\Haque\AppData\Local\Programs\Inno Setup 6\ISCC.exe" installer\racon_desktop_setup.iss
+
+# 3. Copy the installer and manifest into the website download folder
+.\scripts\publish_website.ps1 -Version 0.1.0
+```
+
+The installer script (`installer/racon_desktop_setup.iss`) packages `dist\RACoN\*`. Publishing copies only the current
+installer, not older builds in `dist\installer`.
 
 ---
 

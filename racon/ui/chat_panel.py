@@ -6,10 +6,12 @@ distributed RPC worker clusters, or Ollama models without freezing the UI.
 from __future__ import annotations
 
 import html
+import json
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
@@ -36,6 +38,75 @@ from racon.runtime.rpc_worker import DistributedPipelineEngine
 logger = logging.getLogger(__name__)
 
 DEFAULT_GGUF_MODEL = r"F:\RACoN\Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf"
+DEFAULT_GATEWAY_URL = "https://racon.metademic.org"
+
+
+def resolve_local_model_path() -> Optional[str]:
+    """Find a usable GGUF model on this PC.
+
+    Order: RACON_GGUF_MODEL, the project path, then the per-user models folder. Split models use
+    their first shard, which llama.cpp loads as a whole model.
+    """
+    candidates: List[Path] = []
+    env_path = os.environ.get("RACON_GGUF_MODEL")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path(DEFAULT_GGUF_MODEL))
+
+    try:
+        from racon.config import get_data_dir
+
+        models_dir = get_data_dir() / "models"
+    except Exception:
+        models_dir = None
+    if models_dir and models_dir.exists():
+        ggufs = sorted(models_dir.rglob("*.gguf"))
+        first_shards = [p for p in ggufs if "-00001-of-" in p.name]
+        candidates.extend(first_shards)
+        candidates.extend(p for p in ggufs if p not in first_shards and "split" not in p.name)
+
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None
+
+
+def gateway_config() -> Tuple[Optional[str], Optional[str]]:
+    """Remote gateway URL and API key from environment or %LOCALAPPDATA%\\RACoN\\racon\\gateway.json."""
+    url = os.environ.get("RACON_GATEWAY_URL")
+    key = os.environ.get("RACON_API_KEY")
+    if url and key:
+        return url.rstrip("/"), key
+
+    try:
+        from racon.config import get_data_dir
+
+        cfg = get_data_dir() / "gateway.json"
+        if cfg.exists():
+            data = json.loads(cfg.read_text(encoding="utf-8"))
+            url = url or data.get("url")
+            key = key or data.get("api_key")
+    except Exception as exc:
+        logger.warning("Could not read gateway.json: %s", exc)
+
+    return (url.rstrip("/") if url else None), key
+
+
+def _chat_request(url: str, key: str, model: str, messages: List[Dict[str, str]],
+                  max_tokens: int, temperature: float) -> Optional[Dict[str, Any]]:
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    resp = httpx.post(
+        f"{url}/v1/chat/completions",
+        headers=headers,
+        json={"model": model, "messages": messages, "max_tokens": max_tokens,
+              "temperature": temperature, "stream": False},
+        timeout=300.0,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:160]}")
+    return resp.json()
 
 
 class PromptTextEdit(QTextEdit):
@@ -91,19 +162,32 @@ class InferenceWorker(QThread):
             formatted_prompt += f"{role}: {content}\n"
         formatted_prompt += "Assistant: "
 
-        # 1. Mode: Distributed or Local GGUF (Gemma-3-1B)
-        if "gemma" in self.model_name.lower() or os.path.exists(DEFAULT_GGUF_MODEL) and "local" in self.inference_mode.lower():
+        reasons: List[str] = []
+
+        # 1. Local GGUF model (GPU, then CPU)
+        model_path = resolve_local_model_path()
+        if model_path:
             try:
                 engine = DistributedPipelineEngine()
-                rpc_list = [self.rpc_endpoint] if self.rpc_endpoint and "rpc" in self.inference_mode.lower() else []
+                rpc_list = [self.rpc_endpoint] if self.rpc_endpoint else []
                 res = engine.execute(
-                    model_path=DEFAULT_GGUF_MODEL,
+                    model_path=model_path,
                     rpc_endpoints=rpc_list,
                     prompt=formatted_prompt,
                     max_tokens=self.max_tokens,
                     n_gpu_layers=26,
                     timeout_seconds=120.0,
                 )
+                if res.exit_code != 0:
+                    logger.warning("GPU run failed (%s); retrying on CPU.", res.error)
+                    res = engine.execute(
+                        model_path=model_path,
+                        rpc_endpoints=[],
+                        prompt=formatted_prompt,
+                        max_tokens=self.max_tokens,
+                        timeout_seconds=180.0,
+                        cpu_only=True,
+                    )
                 duration = time.time() - start_time
                 if res.exit_code == 0:
                     stats = {
@@ -115,46 +199,59 @@ class InferenceWorker(QThread):
                     }
                     self.completed.emit(res.response, stats)
                     return
-                elif res.error:
-                    # If error, try REST API fallback below
-                    logger.warning("Local engine returned error: %s. Falling back to REST API.", res.error)
+                reasons.append(f"local model failed: {res.error or 'unknown error'}")
             except Exception as e:
                 logger.warning("Direct engine execution error: %s", e)
+                reasons.append(f"local model error: {e}")
+        else:
+            reasons.append(f"no GGUF model on this PC (set RACON_GGUF_MODEL, expected {DEFAULT_GGUF_MODEL})")
 
-        # 2. Mode: Live Ollama or Backend OpenAI Gateway
-        try:
-            with httpx.Client(timeout=45.0) as client:
-                # Try OpenAI compatibility route on local RACoN coordinator
-                resp = client.post(
-                    "http://127.0.0.1:8765/v1/chat/completions",
-                    json={
-                        "model": self.model_name,
-                        "messages": self.messages,
-                        "max_tokens": self.max_tokens,
-                        "temperature": self.temperature,
-                        "stream": False,
-                    },
-                )
+        # 2. Remote RACoN gateway with an API key (env or gateway.json)
+        gw_url, gw_key = gateway_config()
+        if gw_url and gw_key:
+            try:
+                data = _chat_request(gw_url, gw_key, self.model_name, self.messages,
+                                     self.max_tokens, self.temperature)
                 duration = time.time() - start_time
-                if resp.status_code == 200:
-                    data = resp.json()
-                    content = data["choices"][0]["message"]["content"]
-                    usage = data.get("usage", {})
-                    eval_tokens = usage.get("completion_tokens", len(content.split()))
-                    tps = round(eval_tokens / max(duration, 0.01), 1)
-                    stats = {
-                        "prompt_tps": 0.0,
-                        "eval_tps": tps,
-                        "duration_s": round(duration, 2),
-                        "device": "RACoN Coordinator Gateway",
-                        "memory": {},
-                    }
-                    self.completed.emit(content, stats)
-                    return
-        except Exception:
-            pass
+                content = data["choices"][0]["message"]["content"]
+                usage = data.get("usage", {})
+                eval_tokens = usage.get("completion_tokens", len(content.split()))
+                stats = {
+                    "prompt_tps": 0.0,
+                    "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
+                    "duration_s": round(duration, 2),
+                    "device": f"Remote Gateway ({gw_url})",
+                    "memory": {},
+                }
+                self.completed.emit(content, stats)
+                return
+            except Exception as e:
+                logger.warning("Remote gateway failed: %s", e)
+                reasons.append(f"remote gateway {gw_url}: {e}")
+        else:
+            reasons.append("no remote gateway configured (set RACON_API_KEY or %LOCALAPPDATA%\\RACoN\\racon\\gateway.json)")
 
-        # 3. Direct Ollama REST fallback
+        # 3. Local backend on this PC (OpenAI-compatible, usually backed by Ollama)
+        try:
+            data = _chat_request("http://127.0.0.1:8765", "", self.model_name, self.messages,
+                                 self.max_tokens, self.temperature)
+            duration = time.time() - start_time
+            content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage", {})
+            eval_tokens = usage.get("completion_tokens", len(content.split()))
+            stats = {
+                "prompt_tps": 0.0,
+                "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
+                "duration_s": round(duration, 2),
+                "device": "RACoN Coordinator Gateway",
+                "memory": {},
+            }
+            self.completed.emit(content, stats)
+            return
+        except Exception as e:
+            reasons.append(f"local coordinator gateway: {e}")
+
+        # 4. Direct Ollama REST fallback
         try:
             with httpx.Client(timeout=30.0) as client:
                 resp = client.post(
@@ -180,15 +277,18 @@ class InferenceWorker(QThread):
                     }
                     self.completed.emit(content, stats)
                     return
-        except Exception:
-            pass
+                reasons.append(f"ollama HTTP {resp.status_code}")
+        except Exception as e:
+            reasons.append(f"ollama: {e}")
 
         duration = time.time() - start_time
         fallback_msg = (
-            f"[RACoN] Processed prompt for model '{self.model_name}'. "
-            f"Cluster is active. Start a local Ollama instance or start the Worker Agent in RPC mode to run full neural generation."
+            "[RACoN] Could not generate an answer on this PC. Tried:\n"
+            + "\n".join(f"  - {r}" for r in reasons)
+            + "\nSet RACON_API_KEY (and optionally RACON_GATEWAY_URL) to use the public gateway, "
+              "or place a GGUF model and set RACON_GGUF_MODEL."
         )
-        self.completed.emit(fallback_msg, {"eval_tps": 24.0, "duration_s": round(duration, 2), "device": "Deterministic Core"})
+        self.completed.emit(fallback_msg, {"eval_tps": 0.0, "duration_s": round(duration, 2), "device": "No backend"})
 
 
 class ChatPanel(QWidget):

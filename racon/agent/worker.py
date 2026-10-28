@@ -6,13 +6,21 @@ Verifies coordinator-signed task envelopes and returns signed results.
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
 import secrets
+import shutil
+import socket
+import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import httpx
+
+from racon import netdefaults
 
 from protocols import (
     PROTOCOL_VERSION,
@@ -83,22 +91,37 @@ class RaconAgent:
         self.rpc_endpoint: Optional[str] = None
         self.assigned_shard: Optional[Any] = None
         self.assigned_shard_path: Optional[str] = None
+        self._join_code: Optional[str] = None
+        self._rpc_bind: Optional[str] = None
+        self.gateway_key: Optional[str] = None
 
     def enroll(self, invite_code: str) -> bool:
         """Enroll with coordinator using an invite code."""
+        # Accept the base URL even if the user pasted it with /enroll or a trailing slash.
+        base = self.coordinator_url.strip().rstrip("/")
+        if base.lower().endswith("/enroll"):
+            base = base[: -len("/enroll")]
+        self.coordinator_url = base
+        self.status.coordinator_url = base
+
         hw = discover_hardware()
         caps = HardwareCapabilities(
-            cpu_name=hw.cpu.name,
-            cpu_cores=hw.cpu.physical_cores,
-            ram_total_mb=hw.ram.total_mb,
-            ram_available_mb=hw.ram.available_mb,
-            gpu_name=hw.gpu.name if hw.gpu else None,
-            gpu_vram_mb=hw.gpu.vram_mb if hw.gpu else None,
+            cpu_name=hw.cpu_name,
+            cpu_cores=max(1, hw.cpu_physical_count or hw.cpu_logical_count or 1),
+            ram_total_mb=max(hw.ram_total_mb, 1.0),
+            ram_available_mb=max(hw.ram_available_mb, 0.0),
+            gpu_name=hw.gpu.name,
+            gpu_vram_mb=hw.gpu.vram_total_mb,
             runtimes=["ollama", "local"],
-            os_name=f"{hw.os.name} {hw.os.version}",
+            os_name=f"{hw.os_name} {hw.os_version}".strip(),
             is_simulated=False,
+            rpc_endpoint=(
+                self.rpc_endpoint
+                or (f"{self._rpc_bind}:{netdefaults.rpc_port()}" if self._rpc_bind else None)
+            ),
         )
 
+        self._join_code = invite_code
         now = time.time()
         # Sign canonical payload
         from protocols.crypto import canonicalize_json
@@ -134,6 +157,9 @@ class RaconAgent:
                     self._session_token = enroll_resp.session_token
                     self._coordinator_public_key_hex = enroll_resp.coordinator_public_key
                     self.status.last_error = None
+                    if enroll_resp.gateway_key:
+                        self.gateway_key = enroll_resp.gateway_key
+                        self._save_gateway_config(enroll_resp.gateway_key)
                     logger.info("Enrollment succeeded: state=%s", enroll_resp.trust_state.value)
                     return True
                 else:
@@ -144,6 +170,76 @@ class RaconAgent:
             self.status.last_error = f"Enrollment connection error: {e}"
             logger.error(self.status.last_error)
             return False
+
+    def _save_gateway_config(self, api_key: str) -> None:
+        """Write gateway.json so chat works on this PC without manual setup."""
+        from racon.config import get_data_dir
+
+        try:
+            path = get_data_dir() / "gateway.json"
+            path.write_text(
+                json.dumps({"url": netdefaults.DEFAULT_GATEWAY_URL, "api_key": api_key}, indent=2),
+                encoding="utf-8",
+            )
+            logger.info("Saved gateway API key to %s", path)
+        except Exception as exc:
+            logger.warning("Could not save gateway config: %s", exc)
+
+    @staticmethod
+    def detect_bind_ip() -> str:
+        """Bind address for rpc-server: the Tailscale IP, else the LAN IP, never 0.0.0.0."""
+        exe = shutil.which("tailscale")
+        if exe:
+            try:
+                out = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True, timeout=5)
+                for line in out.stdout.splitlines():
+                    ip = line.strip()
+                    if ip.startswith("100."):
+                        return ip
+            except Exception:
+                pass
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                ip = sock.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+        except Exception:
+            pass
+        return "127.0.0.1"
+
+    def auto_connect(
+        self,
+        join_code: Optional[str] = None,
+        coordinator_url: Optional[str] = None,
+        rpc_bind: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        """Enroll and start the RPC worker with no operator input.
+
+        Used on app launch and at Windows logon. The coordinator URL and join code default to the
+        values baked into the installer and can be overridden by environment variables.
+        """
+        if coordinator_url:
+            self.coordinator_url = coordinator_url.strip().rstrip("/")
+        else:
+            self.coordinator_url = netdefaults.DEFAULT_COORDINATOR_URL
+        self.status.coordinator_url = self.coordinator_url
+
+        code = join_code or os.environ.get("RACON_JOIN_CODE") or netdefaults.DEFAULT_JOIN_CODE
+        bind = rpc_bind or self.detect_bind_ip()
+        if bind in ("0.0.0.0", "::", ""):
+            bind = "127.0.0.1"
+        self._rpc_bind = bind
+
+        if not self.enroll(code):
+            return False, f"Auto-join failed: {self.status.last_error or 'unknown error'}"
+
+        message = f"Joined {self.coordinator_url} as {self.node_id} ({self.status.trust_state.value})."
+        if self.start_rpc_worker(host=bind, port=netdefaults.rpc_port()):
+            message += f" RPC listening on {self.rpc_endpoint}."
+        else:
+            message += " RPC server did not start; this node will only run coordinator tasks."
+        return True, message
 
     def send_heartbeat(self) -> bool:
         """Send periodic heartbeat to coordinator."""
@@ -183,6 +279,10 @@ class RaconAgent:
                         self.status.trust_state = TrustState.REVOKED
                     elif ack.status == "ok" and self.status.trust_state == TrustState.OFFLINE:
                         self.status.trust_state = TrustState.APPROVED
+                    if "re_enroll" in ack.commands and self._join_code:
+                        # The coordinator restarted and forgot this node; rejoin automatically.
+                        logger.info("Coordinator asked for re-enrollment; rejoining.")
+                        self.enroll(self._join_code)
                     return True
         except Exception as e:
             logger.debug("Heartbeat error: %s", e)
@@ -375,7 +475,7 @@ class RaconAgent:
 
     def prepare_and_start_rpc_worker(
         self,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 50052,
         threads: int = 4,
         progress_callback: Optional[Any] = None,
@@ -403,13 +503,16 @@ class RaconAgent:
                 logger.info(msg)
                 return True, msg
             else:
-                return False, "Failed to launch native rpc-server process."
+                from racon.runtime.distributed_gguf import find_llama_tool
+                if not find_llama_tool("rpc-server"):
+                    return False, "rpc-server.exe not found. Reinstall RACoN, or install llama.cpp (winget install ggml.llamacpp)."
+                return False, "rpc-server.exe was found but did not start. Check that the port is free and not reserved by Windows."
         except Exception as e:
             err = f"Failed to prepare worker layer shard: {e}"
             logger.error(err)
             return False, err
 
-    def start_rpc_worker(self, host: str = "0.0.0.0", port: int = 50052, threads: int = 4) -> bool:
+    def start_rpc_worker(self, host: str = "127.0.0.1", port: int = 50052, threads: int = 4) -> bool:
         """Start the native llama.cpp RPC server for remote layer execution."""
         from racon.runtime.rpc_worker import RpcServerProcess
         if self.rpc_server and self.rpc_server.is_running():

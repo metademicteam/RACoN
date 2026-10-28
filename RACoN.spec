@@ -3,10 +3,26 @@ from pathlib import Path
 
 block_cipher = None
 
+import glob
+import os
+
+LLAMA_CPP_DIR = next(
+    iter(sorted(glob.glob(r"C:\Users\*\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_*"))),
+    None,
+)
+if not LLAMA_CPP_DIR or not os.path.isfile(os.path.join(LLAMA_CPP_DIR, 'rpc-server.exe')):
+    raise SystemExit("llama.cpp not found. Install it first: winget install ggml.llamacpp")
+
+llama_binaries = [
+    (os.path.join(LLAMA_CPP_DIR, name), 'llama')
+    for name in os.listdir(LLAMA_CPP_DIR)
+    if name.endswith('.dll') or name in ('rpc-server.exe', 'llama-server.exe', 'llama-cli.exe')
+]
+
 datas = [
     ('racon/scenarios/sample_scenarios.json', 'racon/scenarios'),
     ('apps/desktop/icon.ico', '.'),
-]
+] + llama_binaries
 
 hiddenimports = [
     'PySide6',

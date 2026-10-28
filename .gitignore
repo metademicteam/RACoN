@@ -42,6 +42,7 @@ racon_benchmarks.json
 racon_diagnostics.json
 
 # IDE & OS
+.commandcode/
 .vscode/
 .idea/
 *.swp

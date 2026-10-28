@@ -6,9 +6,12 @@ Enforces expiration, maximum usage caps, and instant revocation (ADR-009).
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import secrets
 import threading
 import time
+from pathlib import Path
 from typing import Dict, Optional
 from pydantic import BaseModel, Field
 
@@ -25,9 +28,35 @@ class InviteRecord(BaseModel):
 
 
 class InviteManager:
-    def __init__(self) -> None:
+    def __init__(self, store_path: Optional[Path] = None) -> None:
         self._lock = threading.Lock()
         self._invites: Dict[str, InviteRecord] = {}  # code_hash -> InviteRecord
+        self._store_path = Path(store_path) if store_path else None
+        self._load()
+
+    def _load(self) -> None:
+        """Restore invites so codes survive a coordinator restart."""
+        if not self._store_path or not self._store_path.exists():
+            return
+        try:
+            data = json.loads(self._store_path.read_text(encoding="utf-8"))
+            for entry in data.get("invites", []):
+                record = InviteRecord(**entry)
+                self._invites[record.code_hash] = record
+        except Exception:
+            # A corrupt file must not stop the coordinator; start with no invites.
+            self._invites = {}
+
+    def _save_locked(self) -> None:
+        if not self._store_path:
+            return
+        self._store_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self._store_path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"invites": [r.model_dump() for r in self._invites.values()]}, indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp, self._store_path)
 
     def create_invite(
         self,
@@ -53,6 +82,7 @@ class InviteManager:
 
         with self._lock:
             self._invites[code_hash] = record
+            self._save_locked()
 
         return plaintext_code
 
@@ -73,6 +103,7 @@ class InviteManager:
                 return False
 
             record.uses_count += 1
+            self._save_locked()
             return True
 
     def revoke_invite(self, plaintext_or_hash: str) -> bool:
@@ -87,6 +118,7 @@ class InviteManager:
             record = self._invites.get(target_hash)
             if record:
                 record.is_revoked = True
+                self._save_locked()
                 return True
             return False
 

@@ -1,0 +1,31 @@
+# RACoN public website (static site + installer downloads).
+# The API gateway and the Cloudflare tunnel run on the host, not in this container.
+#
+#   cd website
+#   docker compose up -d --build
+#
+# Ports are bound to 127.0.0.1 only. cloudflared is the only public entry point.
+
+services:
+  racon-site:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: racon-site:0.1.0
+    container_name: racon-site
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8081:80"
+    volumes:
+      - ../dist/website_downloads:/usr/share/nginx/downloads:ro
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

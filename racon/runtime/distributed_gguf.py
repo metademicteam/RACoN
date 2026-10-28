@@ -24,25 +24,38 @@ logger = logging.getLogger(__name__)
 DEFAULT_WINGET_PATTERN = r"C:\Users\*\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_*\*"
 
 
+def bundled_llama_dir() -> Optional[Path]:
+    """Folder that holds llama.cpp binaries shipped inside the installer, if any."""
+    import sys
+
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.append(Path(meipass) / "llama")
+    candidates.append(Path(sys.executable).resolve().parent / "llama")
+    candidates.append(Path(__file__).resolve().parents[2] / "llama")
+    for c in candidates:
+        if (c / "rpc-server.exe").is_file() or (c / "llama-server.exe").is_file():
+            return c
+    return None
+
+
 def find_llama_tool(tool_name: str) -> Optional[str]:
-    """Find a llama.cpp binary by searching PATH and default install locations."""
-    # 1. System PATH
-    found = shutil.which(tool_name)
+    """Find a llama.cpp binary: bundled with the app, then PATH, then the WinGet install."""
+    exe_name = tool_name if tool_name.endswith(".exe") else f"{tool_name}.exe"
+
+    # 1. Binaries shipped with RACoN (installer or PyInstaller bundle)
+    bundled = bundled_llama_dir()
+    if bundled and (bundled / exe_name).is_file():
+        return str(bundled / exe_name)
+
+    # 2. System PATH
+    found = shutil.which(tool_name) or shutil.which(exe_name)
     if found and os.path.exists(found):
         return found
 
-    # 2. Add .exe on Windows if not provided
-    if not tool_name.endswith(".exe"):
-        exe_name = f"{tool_name}.exe"
-        found = shutil.which(exe_name)
-        if found and os.path.exists(found):
-            return found
-    else:
-        exe_name = tool_name
-
     # 3. Check WinGet Packages directory
-    matches = glob.glob(DEFAULT_WINGET_PATTERN)
-    for m in matches:
+    for m in glob.glob(DEFAULT_WINGET_PATTERN):
         candidate = os.path.join(m, exe_name)
         if os.path.isfile(candidate):
             return candidate

@@ -117,4 +117,5 @@ All 80 unit and integration tests cover:
 - [`docs/DISTRIBUTED_RUNTIME.md`](docs/DISTRIBUTED_RUNTIME.md) — Worker protocol and execution mode boundaries.
 - [`docs/TAILSCALE_DOCKER.md`](docs/TAILSCALE_DOCKER.md) — Tailscale mesh remote access and Docker container deployment guide.
 - [`docs/BUILD_WINDOWS.md`](docs/BUILD_WINDOWS.md) — Windows packaging and installer compilation.
+- [`docs/ZERO_CONFIG.md`](docs/ZERO_CONFIG.md) — Auto-join, autostart, gateway keys and cluster discovery.
 - [`CHANGELOG.md`](CHANGELOG.md) — Version history and release notes.

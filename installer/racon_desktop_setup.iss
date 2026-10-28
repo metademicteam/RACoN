@@ -4,7 +4,7 @@
 #define MyAppName "RACoN"
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "RACoN Network"
-#define MyAppURL "https://github.com/RACoN-AI"
+#define MyAppURL "https://racon.metademic.org"
 #define MyAppExeName "RACoN.exe"
 
 [Setup]
@@ -31,6 +31,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "autostart"; Description: "Start RACoN when Windows starts (joins the network in the background)"; GroupDescription: "Startup:"
 
 [Files]
 Source: "..\dist\RACoN\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
@@ -38,6 +39,7 @@ Source: "..\dist\RACoN\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Parameters: "--autostart"; Tasks: autostart
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

@@ -102,6 +102,8 @@ class EnrollmentResponse(BaseModel):
     token_expiry: Optional[float] = None
     coordinator_public_key: str = Field(..., min_length=64, max_length=64)
     message: str = Field(..., max_length=512)
+    # Issued once at enrollment so the node can call the public gateway without manual setup.
+    gateway_key: Optional[str] = Field(None, max_length=128)
 
 
 class HeartbeatMessage(BaseModel):

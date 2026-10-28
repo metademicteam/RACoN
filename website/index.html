@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RACoN — Resource-Aware Collaborative Network</title>
+  <meta name="description" content="RACoN coordinates compute across Windows PCs for local-first distributed AI inference. Download the Windows installer or call the public API.">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/">RACoN</a>
+    <nav>
+      <a href="#about">About</a>
+      <a href="#how">How it works</a>
+      <a href="#api">API</a>
+      <a href="#status">Status</a>
+      <a href="#download" class="btn btn-small">Download</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <p class="eyebrow">Resource-Aware Collaborative Network</p>
+      <h1>Pool your PCs for local-first AI inference.</h1>
+      <p class="lead">
+        RACoN runs one model across several Windows PCs. Each machine keeps its own memory, and the scheduler splits the
+        model's layers by each PC's free capacity. If a worker goes offline, its layers move back to the main PC.
+      </p>
+      <div class="actions">
+        <a class="btn" href="#download">Download for Windows</a>
+        <a class="btn btn-ghost" href="#api">Use the API</a>
+      </div>
+    </section>
+
+    <section id="about">
+      <h2>What RACoN is</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Local-first desktop app</h3>
+          <p>A native Windows app (PySide6) with hardware telemetry, a scheduler lab, benchmark history and a chat panel.
+            Everything runs on your machine by default.</p>
+        </article>
+        <article class="card">
+          <h3>Honest metrics</h3>
+          <p>Hardware that does not expose real numbers, such as the Intel UHD 630 GPU, reports <em>Unavailable</em>
+            instead of a made-up figure. Simulated results are labeled as simulated.</p>
+        </article>
+        <article class="card">
+          <h3>Safe by design</h3>
+          <p>Workers run only allow-listed task types. Public API calls need an API key. Admin controls stay on
+            loopback and are never published.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="how">
+      <h2>How it works</h2>
+      <ol class="steps">
+        <li><strong>Install</strong> the Windows installer on each PC. It installs per-user and needs no admin rights.</li>
+        <li><strong>Join</strong> the cluster over Tailscale. Workers expose only a single Tailscale address for layer traffic.</li>
+        <li><strong>Serve</strong> the model. The head PC measures each device and assigns layers in proportion to free memory.</li>
+        <li><strong>Call</strong> the OpenAI-compatible API at <code>racon.metademic.org/v1</code> with an API key.</li>
+      </ol>
+      <p class="note">Model weights and activations never travel over the public internet. Only API requests and responses do.
+        Multiple PCs do not form a single pooled RAM or VRAM space.</p>
+    </section>
+
+    <section id="download">
+      <h2>Download</h2>
+      <div class="card download">
+        <div>
+          <h3>RACoN for Windows (x64)</h3>
+          <p>Installer v0.1.0. Installs to <code>%LOCALAPPDATA%\Programs\RACoN</code>. No administrator rights needed.</p>
+          <p class="muted" id="installer-meta">Size and checksum load below.</p>
+        </div>
+        <a class="btn" href="/downloads/RACoN_Setup_v0.1.0.exe" download>Download RACoN_Setup_v0.1.0.exe</a>
+      </div>
+      <details class="verify">
+        <summary>Verify the download</summary>
+        <p>Compare the SHA-256 hash of the file you downloaded with the value below.</p>
+        <pre id="installer-sha">loading…</pre>
+      </details>
+    </section>
+
+    <section id="api">
+      <h2>Public API</h2>
+      <p>An OpenAI-compatible gateway in front of the model. Any OpenAI client works with it.</p>
+      <pre><code>curl https://racon.metademic.org/v1/chat/completions \
+  -H "Authorization: Bearer rk_your_key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma-3-1b","messages":[{"role":"user","content":"Hello"}],"max_tokens":64}'</code></pre>
+      <ul class="facts">
+        <li>Endpoints: <code>/v1/chat/completions</code>, <code>/v1/completions</code>, <code>/v1/embeddings</code>, <code>/v1/models</code></li>
+        <li>Auth: <code>Authorization: Bearer rk_…</code> (keys are issued by the operator; only SHA-256 digests are stored)</li>
+        <li>Limits: 30 requests/min per client IP, 60 requests/min per key, <code>max_tokens</code> up to 2048</li>
+        <li>Errors: <code>401</code> bad key, <code>429</code> rate limit (see <code>Retry-After</code>), <code>503</code> model offline</li>
+      </ul>
+      <p class="note">Public workloads may be visible to the operator of the machine that runs them. Do not send personal,
+        confidential, medical, financial or credential data.</p>
+    </section>
+
+    <section id="status">
+      <h2>Service status</h2>
+      <p>Live health of the gateway. This site is hosted from a home PC, so it is only up while that PC is online.</p>
+      <div class="card" id="health">Checking…</div>
+    </section>
+
+    <section id="project">
+      <h2>Project</h2>
+      <ul class="facts">
+        <li>Source: <a href="https://github.com/metademicteam/RACoN">github.com/metademicteam/RACoN</a></li>
+        <li>License: see the LICENSE file in the repository</li>
+        <li>Docs: architecture, security model, ADRs and the cluster runbook are in the repository <code>docs/</code> folder</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>RACoN Network · <a href="/health">gateway health</a> · Hosted at racon.metademic.org</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

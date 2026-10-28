@@ -7,6 +7,8 @@ provides enrollment with invite codes, and resource controls.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
 from typing import Optional
 
@@ -14,9 +16,10 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QGroupBox, QFormLayout, QProgressBar, QTextEdit,
-    QMessageBox,
+    QMessageBox, QCheckBox,
 )
 
+from racon import netdefaults
 from racon.agent.worker import RaconAgent
 from racon.ui.styles import ACCENT_CYAN, TEXT_SECONDARY, CARD_BG, BORDER_COLOR
 
@@ -30,7 +33,7 @@ class WorkerAgentPanel(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self._agent = RaconAgent(coordinator_url="http://127.0.0.1:8765")
+        self._agent = RaconAgent(coordinator_url=netdefaults.DEFAULT_COORDINATOR_URL)
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(2000)
         self._poll_timer.timeout.connect(self._refresh_status)
@@ -38,6 +41,10 @@ class WorkerAgentPanel(QWidget):
         self._setup_ui()
         self._refresh_status()
         self._poll_timer.start()
+
+        # Zero-config join: enroll and start the RPC worker shortly after launch.
+        if os.environ.get("RACON_AUTO_CONNECT", "1") != "0":
+            QTimer.singleShot(1200, self._auto_connect)
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -98,14 +105,14 @@ class WorkerAgentPanel(QWidget):
 
         coord_row = QHBoxLayout()
         coord_row.addWidget(QLabel("Coordinator URL:"))
-        self._coord_input = QLineEdit("http://127.0.0.1:8765")
+        self._coord_input = QLineEdit(netdefaults.DEFAULT_COORDINATOR_URL)
         coord_row.addWidget(self._coord_input)
         conn_layout.addLayout(coord_row)
 
         invite_row = QHBoxLayout()
         invite_row.addWidget(QLabel("Invite Code:"))
         self._invite_input = QLineEdit()
-        self._invite_input.setPlaceholderText("e.g. RCN-ABC123XYZ456")
+        self._invite_input.setPlaceholderText("Leave blank to join automatically")
         invite_row.addWidget(self._invite_input)
 
         self._enroll_btn = QPushButton("Enroll Node")
@@ -113,6 +120,10 @@ class WorkerAgentPanel(QWidget):
         self._enroll_btn.clicked.connect(self._on_enroll_clicked)
         invite_row.addWidget(self._enroll_btn)
         conn_layout.addLayout(invite_row)
+
+        self._auto_connect_cb = QCheckBox("Auto-connect on launch (join and start RPC with no invite)")
+        self._auto_connect_cb.setChecked(True)
+        conn_layout.addWidget(self._auto_connect_cb)
 
         layout.addWidget(conn_group)
 
@@ -219,13 +230,23 @@ class WorkerAgentPanel(QWidget):
         self._pause_btn.setEnabled(status["is_running"] and not status["is_paused"])
         self._resume_btn.setEnabled(status["is_running"] and status["is_paused"])
 
-    def _on_enroll_clicked(self):
-        invite_code = self._invite_input.text().strip()
-        if not invite_code:
-            QMessageBox.warning(self, "Missing Invite Code", "Please enter an invite code to enroll.")
+    def _auto_connect(self):
+        """Join and start contributing with no operator input."""
+        if not self._auto_connect_cb.isChecked() or self._agent.status.is_running:
             return
+        self._append_log("Auto-connecting to the RACoN network...")
 
-        coord_url = self._coord_input.text().strip()
+        def _run():
+            ok, msg = self._agent.auto_connect()
+            self._append_log(("Auto-connected: " if ok else "Auto-connect failed: ") + msg)
+            if ok and not self._agent.status.is_running:
+                self._agent.start()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _on_enroll_clicked(self):
+        invite_code = self._invite_input.text().strip() or netdefaults.DEFAULT_JOIN_CODE
+        coord_url = self._coord_input.text().strip() or netdefaults.DEFAULT_COORDINATOR_URL
         self._agent.coordinator_url = coord_url
         self._append_log(f"Attempting enrollment at {coord_url}...")
 

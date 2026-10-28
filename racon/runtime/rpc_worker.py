@@ -163,8 +163,12 @@ class DistributedPipelineEngine:
         tensor_split: Optional[List[float]] = None,
         threads: int = 4,
         timeout_seconds: float = 120.0,
+        cpu_only: bool = False,
     ) -> DistributedInferenceResult:
-        """Execute distributed inference across specified RPC endpoints."""
+        """Execute distributed inference across specified RPC endpoints.
+
+        cpu_only runs llama-cli without the Vulkan GPU backend, for hosts whose GPU runs out of memory.
+        """
         if not self.cli_bin or not os.path.exists(self.cli_bin):
             return DistributedInferenceResult(
                 response="",
@@ -196,15 +200,17 @@ class DistributedPipelineEngine:
         cmd = [
             self.cli_bin,
             "-m", model_path,
-            "-ngl", str(n_gpu_layers),
+            "-ngl", "0" if cpu_only else str(n_gpu_layers),
             "-p", prompt,
             "-n", str(max_tokens),
             "--no-warmup",
             "--single-turn",
             "-t", str(threads),
         ]
+        if cpu_only:
+            cmd.extend(["--device", "none"])
 
-        if rpc_endpoints:
+        if rpc_endpoints and not cpu_only:
             rpc_arg = ",".join(rpc_endpoints)
             cmd.extend(["--rpc", rpc_arg, "-sm", split_mode])
 
