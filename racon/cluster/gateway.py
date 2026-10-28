@@ -82,7 +82,7 @@ def create_gateway(
 
     app = FastAPI(
         title="RACoN Cluster Gateway",
-        version="0.1.0",
+        version="1.0.1",
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

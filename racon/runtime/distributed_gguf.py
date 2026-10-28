@@ -357,6 +357,15 @@ def download_shard(
         logger.info("Shard %s already exists and verified via SHA-256.", shard.filename)
         return str(target_file)
 
+    # Check SSD wear guard budget before commencing download
+    from racon.runtime.storage_guard import get_storage_guard, StorageQuotaExceededError
+    guard = get_storage_guard()
+    if not guard.check_write_allowed(shard.file_size_bytes):
+        raise StorageQuotaExceededError(
+            f"Daily SSD write guard triggered: downloading {shard.file_size_bytes / (1024**2):.1f} MB "
+            f"would exceed the daily write quota ({guard.load_metrics().gb_limit:.1f} GB/day)."
+        )
+
     # Determine URL
     url = shard.download_url
     if not url:
@@ -393,6 +402,7 @@ def download_shard(
     if target_file.exists():
         target_file.unlink()
     tmp_file.rename(target_file)
+    guard.record_write(downloaded_bytes)
     logger.info("Shard %s downloaded and SHA-256 verified successfully.", shard.filename)
     return str(target_file)
 

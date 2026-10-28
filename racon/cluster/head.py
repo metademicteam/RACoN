@@ -39,6 +39,10 @@ def build_head_command(
         "--jinja",
         "--api-key", internal_key,
     ]
+    if getattr(cfg, "kv_cache_type", None) and cfg.kv_cache_type in ("q8_0", "q4_0", "q4_1", "f16"):
+        cmd.extend(["-ctk", cfg.kv_cache_type, "-ctv", cfg.kv_cache_type])
+    if getattr(cfg, "flash_attn", False):
+        cmd.append("-fa")
     if workers:
         cmd.extend(["--rpc", ",".join(w.address for w in workers), "-sm", "layer"])
         if plan is not None and plan.tensor_split:

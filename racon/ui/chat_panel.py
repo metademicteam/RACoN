@@ -109,6 +109,65 @@ def _chat_request(url: str, key: str, model: str, messages: List[Dict[str, str]]
     return resp.json()
 
 
+def _chat_stream_request(
+    url: str,
+    key: str,
+    model: str,
+    messages: List[Dict[str, str]],
+    max_tokens: int,
+    temperature: float,
+    on_token: Optional[Any] = None,
+    is_cancelled: Optional[Any] = None,
+) -> Tuple[str, Dict[str, Any]]:
+    """Stream chat completions from an OpenAI-compatible SSE endpoint chunk-by-chunk."""
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    full_content: List[str] = []
+
+    with httpx.stream(
+        "POST",
+        f"{url}/v1/chat/completions",
+        headers=headers,
+        json={
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": True,
+        },
+        timeout=180.0,
+    ) as resp:
+        if resp.status_code != 200:
+            err_body = resp.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {resp.status_code}: {err_body[:160]}")
+
+        for line in resp.iter_lines():
+            if is_cancelled and is_cancelled():
+                break
+            if not line:
+                continue
+            line_str = line.strip()
+            if line_str.startswith("data: "):
+                data_val = line_str[6:].strip()
+                if data_val == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data_val)
+                    choices = chunk.get("choices", [])
+                    if choices:
+                        delta = choices[0].get("delta", {}).get("content", "")
+                        if delta:
+                            full_content.append(delta)
+                            if on_token:
+                                on_token(delta)
+                except Exception:
+                    pass
+
+    text = "".join(full_content)
+    return text, {"eval_tokens": len(full_content)}
+
+
 class PromptTextEdit(QTextEdit):
     """Custom text edit that sends prompt on Enter, inserts newline on Shift+Enter."""
     send_requested = Signal()
@@ -210,12 +269,24 @@ class InferenceWorker(QThread):
         gw_url, gw_key = gateway_config()
         if gw_url and gw_key:
             try:
-                data = _chat_request(gw_url, gw_key, self.model_name, self.messages,
-                                     self.max_tokens, self.temperature)
+                def _handle_gw_token(tok: str):
+                    self.token_generated.emit(tok)
+
+                content, extra = _chat_stream_request(
+                    gw_url, gw_key, self.model_name, self.messages,
+                    self.max_tokens, self.temperature,
+                    on_token=_handle_gw_token,
+                    is_cancelled=lambda: self._is_cancelled,
+                )
+                if not content:
+                    # Fallback to non-streaming if stream yielded no tokens
+                    data = _chat_request(gw_url, gw_key, self.model_name, self.messages,
+                                         self.max_tokens, self.temperature)
+                    content = data["choices"][0]["message"]["content"]
+                    extra = {"eval_tokens": len(content.split())}
+
                 duration = time.time() - start_time
-                content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage", {})
-                eval_tokens = usage.get("completion_tokens", len(content.split()))
+                eval_tokens = extra.get("eval_tokens", len(content.split()))
                 stats = {
                     "prompt_tps": 0.0,
                     "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
@@ -233,12 +304,23 @@ class InferenceWorker(QThread):
 
         # 3. Local backend on this PC (OpenAI-compatible, usually backed by Ollama)
         try:
-            data = _chat_request("http://127.0.0.1:8765", "", self.model_name, self.messages,
-                                 self.max_tokens, self.temperature)
+            def _handle_local_token(tok: str):
+                self.token_generated.emit(tok)
+
+            content, extra = _chat_stream_request(
+                "http://127.0.0.1:8765", "", self.model_name, self.messages,
+                self.max_tokens, self.temperature,
+                on_token=_handle_local_token,
+                is_cancelled=lambda: self._is_cancelled,
+            )
+            if not content:
+                data = _chat_request("http://127.0.0.1:8765", "", self.model_name, self.messages,
+                                     self.max_tokens, self.temperature)
+                content = data["choices"][0]["message"]["content"]
+                extra = {"eval_tokens": len(content.split())}
+
             duration = time.time() - start_time
-            content = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
-            eval_tokens = usage.get("completion_tokens", len(content.split()))
+            eval_tokens = extra.get("eval_tokens", len(content.split()))
             stats = {
                 "prompt_tps": 0.0,
                 "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
@@ -298,6 +380,8 @@ class ChatPanel(QWidget):
         super().__init__(parent)
         self._history: List[Dict[str, str]] = []
         self._worker: Optional[InferenceWorker] = None
+        self._is_streaming: bool = False
+        self._streaming_text: str = ""
         self._setup_ui()
 
     def _setup_ui(self):
@@ -427,6 +511,12 @@ class ChatPanel(QWidget):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.terminate()
+            if self._is_streaming:
+                self._chat_browser.append(
+                    """<div style="margin-top: 4px; font-size: 11px; color: #f38ba8;">[Generation stopped by user]</div></div></div>"""
+                )
+                self._is_streaming = False
+                self._streaming_text = ""
             self._status_label.setText("Generation stopped by user.")
             self._send_btn.setEnabled(True)
             self._stop_btn.setEnabled(False)
@@ -447,6 +537,8 @@ class ChatPanel(QWidget):
         self._status_label.setText(f"⚡ Generating response via {model_raw} ({mode_text})...")
         self._send_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
+        self._is_streaming = False
+        self._streaming_text = ""
 
         # Launch background worker
         self._worker = InferenceWorker(
@@ -457,16 +549,58 @@ class ChatPanel(QWidget):
             rpc_endpoint="127.0.0.1:50052" if "rpc" in mode_text.lower() else None,
             parent=self,
         )
+        self._worker.token_generated.connect(self._on_token_received)
         self._worker.completed.connect(self._on_inference_completed)
         self._worker.failed.connect(self._on_inference_failed)
         self._worker.start()
 
+    @Slot(str)
+    def _on_token_received(self, token: str):
+        if not self._is_streaming:
+            self._is_streaming = True
+            self._streaming_text = token
+            # Start streaming assistant message bubble
+            self._chat_browser.append(
+                """
+                <div style="margin-top: 10px; margin-bottom: 10px;">
+                    <div style="background-color: #181825; color: #cdd6f4; border: 1px solid #313244; 
+                                border-radius: 10px 10px 10px 2px; padding: 12px 16px; max-width: 90%; display: inline-block;">
+                        <b style="color: #a6e3a1;">RACoN:</b><br/>
+                """
+            )
+            cursor = self._chat_browser.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(token)
+            self._chat_browser.setTextCursor(cursor)
+        else:
+            self._streaming_text += token
+            cursor = self._chat_browser.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            cursor.insertText(token)
+            self._chat_browser.setTextCursor(cursor)
+
     @Slot(str, dict)
     def _on_inference_completed(self, response: str, stats: dict):
         self._history.append({"role": "assistant", "content": response})
-        self._append_message_html("assistant", response, stats)
+        tps = stats.get("eval_tps", 0)
+        dur = stats.get("duration_s", 0)
+        dev = stats.get("device", "Local")
+
+        if self._is_streaming:
+            badge_html = f"""
+            <div style="margin-top: 6px; font-size: 11px; color: #a6adc8; border-top: 1px solid #262738; padding-top: 4px;">
+                ⚡ <b>{tps} t/s</b> • {dur}s • <span style="color: #a6e3a1;">{dev}</span>
+            </div>
+            </div></div>
+            """
+            self._chat_browser.append(badge_html)
+            self._is_streaming = False
+            self._streaming_text = ""
+        else:
+            self._append_message_html("assistant", response, stats)
+
         self._status_label.setText(
-            f"Completed in {stats.get('duration_s', 0)}s ({stats.get('eval_tps', 0)} tokens/s) • {stats.get('device', 'Local')}"
+            f"Completed in {dur}s ({tps} tokens/s) • {dev}"
         )
         self._send_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)

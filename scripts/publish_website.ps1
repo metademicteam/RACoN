@@ -4,10 +4,10 @@
 #
 # Usage:
 #   .\scripts\publish_website.ps1
-#   .\scripts\publish_website.ps1 -Version 0.1.0
+#   .\scripts\publish_website.ps1 -Version 1.0.1
 
 param(
-    [string]$Version = "0.1.0"
+    [string]$Version = "1.0.1"
 )
 
 $ErrorActionPreference = "Stop"

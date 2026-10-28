@@ -27,7 +27,7 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger = logging.getLogger("racon")
-    logger.info("RACoN v0.1.0 starting")
+    logger.info("RACoN v1.0.1 starting")
 
     try:
         from PySide6.QtWidgets import QApplication
@@ -39,7 +39,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("RACoN")
-    app.setApplicationVersion("0.1.0")
+    app.setApplicationVersion("1.0.1")
     app.setOrganizationName("RACoN")
 
     window = RaconApp()

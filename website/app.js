@@ -18,6 +18,11 @@
     document.getElementById("installer-meta").textContent =
       `${m.file} · ${(m.size_bytes / 1048576).toFixed(1)} MB · built ${m.built_at}`;
     document.getElementById("installer-sha").textContent = m.sha256;
+    const btn = document.getElementById("download-btn");
+    if (btn && m.file) {
+      btn.href = `/downloads/${m.file}`;
+      btn.textContent = `Download ${m.file}`;
+    }
   } catch (err) {
     document.getElementById("installer-meta").textContent = "Installer metadata unavailable.";
     document.getElementById("installer-sha").textContent = "unavailable";

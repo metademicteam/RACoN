@@ -36,6 +36,8 @@ class ClusterConfig:
     context_size: int = 8192
     threads: int = 4
     max_tokens_limit: int = 2048
+    kv_cache_type: str = "q8_0"  # q8_0, q4_0, or f16 for reduced attention cache memory
+    flash_attn: bool = False  # Enable flash attention when supported by backend
     total_layers: Optional[int] = None  # read from GGUF metadata when unset
 
 

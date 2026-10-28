@@ -2,7 +2,7 @@
 ; Per-User Installation (No Administrator / UAC elevation required)
 
 #define MyAppName "RACoN"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "1.0.1"
 #define MyAppPublisher "RACoN Network"
 #define MyAppURL "https://racon.metademic.org"
 #define MyAppExeName "RACoN.exe"
@@ -19,7 +19,7 @@ DefaultDirName={localappdata}\Programs\RACoN
 DisableProgramGroupPage=yes
 LicenseFile=..\LICENSE
 OutputDir=..\dist\installer
-OutputBaseFilename=RACoN_Setup_v0.1.0
+OutputBaseFilename=RACoN_Setup_v1.0.1
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern

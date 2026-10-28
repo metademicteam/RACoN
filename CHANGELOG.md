@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-10-28
+### Added
+- **Real-Time Token Streaming (SSE)**: Chat UI now parses Server-Sent Events (`stream: true`) chunk-by-chunk from the public gateway and local coordinator, delivering low-latency real-time response rendering.
+- **SSD Storage & Write-Wear Guard (`racon/runtime/storage_guard.py`)**: Enforces daily NVMe/SSD write ceilings (default 30 GB/day) to prevent runaway model re-download wear cycles on consumer drives.
+- **Quantized KV Cache Support (`-ctk q8_0 -ctv q8_0`)**: Added support in cluster head server for quantized attention caches, cutting memory consumption in half.
+- **Dynamic Installer Manifest Binding**: Public website UI (`website/app.js`, `website/index.html`) automatically discovers and links to the latest version and checksum from `manifest.json`.
+
+### Fixed
+- **Windows Defender False Positive (Error 225)**: Disabled UPX compression (`upx=False`) in PyInstaller build specifications (`RACoN.spec`, `RACoN_Desktop.spec`) to eliminate heuristic ML false-positive quarantine on clean Windows machines.
+- **Chat Fallback Resilience**: Added automatic graceful fallback from streaming to standard chat completions upon network interruptions.
+
 ## [Unreleased]
 ### Added
 - **Zero-config join**: installed apps auto-enroll with a built-in join code, auto-approve, and start

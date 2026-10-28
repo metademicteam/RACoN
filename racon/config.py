@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 APP_NAME = "RACoN"
 APP_AUTHOR = "RACoN"
-VERSION = "0.1.0"
+VERSION = "1.0.1"
 
 def get_data_dir() -> Path:
     """Return the per-user application data directory, creating it if needed."""

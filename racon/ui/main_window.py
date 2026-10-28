@@ -33,7 +33,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RACoN v0.1.0 — Resource-Aware Compute Orchestration")
+        self.setWindowTitle("RACoN v1.0.1 — Resource-Aware Compute Orchestration")
         self.setMinimumSize(1000, 700)
         self.resize(1200, 800)
         self.setStyleSheet(DARK_STYLESHEET)
