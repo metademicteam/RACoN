@@ -69,7 +69,7 @@ class TailscaleFunnelIngress(PublicIngress):
         self._lock = threading.Lock()
 
     def _find_tailscale_cli(self) -> Optional[str]:
-        # Check standard Windows paths and PATH environment
+        # Check the PATH first (works on Windows and Linux), then common install locations.
         found = shutil.which("tailscale.exe") or shutil.which("tailscale")
         if found:
             return found
@@ -77,6 +77,9 @@ class TailscaleFunnelIngress(PublicIngress):
         standard_paths = [
             r"C:\Program Files\Tailscale\tailscale.exe",
             r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+            "/usr/bin/tailscale",
+            "/usr/local/bin/tailscale",
+            "/opt/homebrew/bin/tailscale",
         ]
         for p in standard_paths:
             if shutil.os.path.exists(p):
@@ -94,7 +97,7 @@ class TailscaleFunnelIngress(PublicIngress):
                 return self._status.model_copy()
 
             try:
-                # Run `tailscale.exe funnel status` safely with arg list
+                # Run `tailscale funnel status` safely with an argument list
                 proc = subprocess.run(
                     [self._cli_path, "funnel", "status"],
                     capture_output=True,

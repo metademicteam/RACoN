@@ -75,6 +75,22 @@ def test_head_command_without_workers_skips_rpc():
     assert "--rpc" not in cmd
 
 
+def test_head_command_forces_cpu_when_rpc_workers_are_active():
+    cfg = ClusterConfig(
+        model_path="m.gguf",
+        n_gpu_layers=26,
+        workers=[WorkerEndpoint("a", "100.1.1.1", 50052)],
+    )
+    cmd = build_head_command(cfg, "llama-server", "secret")
+    assert cmd[cmd.index("-ngl") + 1] == "0"
+
+
+def test_head_command_keeps_gpu_without_workers():
+    cfg = ClusterConfig(model_path="m.gguf", n_gpu_layers=26)
+    cmd = build_head_command(cfg, "llama-server", "secret")
+    assert cmd[cmd.index("-ngl") + 1] == "26"
+
+
 @pytest.fixture
 def key_store(tmp_path):
     return ApiKeyStore(tmp_path / "keys.json")

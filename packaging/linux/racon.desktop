@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RACoN
+Comment=Resource-Aware Collaborative Network
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Utility;Network;
+Keywords=AI;distributed;compute;cluster;
+StartupWMClass=RACoN

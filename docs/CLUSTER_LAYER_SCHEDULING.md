@@ -72,6 +72,11 @@ option for storage-constrained workers that do not hold the full model, which th
 
 - **Restart downtime.** Each membership change restarts `llama-server`. Requests in flight fail once. The model
   load time (seconds on this PC) sets the outage length.
+- **GPU + RPC split.** When RPC workers are active the head is started with `-ngl 0`; a mixed GPU + RPC
+  split (for example Vulkan0 + RPC0) can stall at model load. Head-only mode still uses the GPU.
+- **Worker shard download.** The desktop Worker Agent downloads and verifies its assigned split-model
+  shard in the background after enrollment and shows progress in the activity log. The RPC layer
+  split does not wait for this download; layers still arrive from the head over the RPC connection.
 - **Memory only.** Placement ignores compute speed. A fast worker and a slow worker with the same memory get the
   same share, so the slow one can limit throughput.
 - **Per-layer size is an average.** Embedding and output-head tensors are spread across layers in this estimate.

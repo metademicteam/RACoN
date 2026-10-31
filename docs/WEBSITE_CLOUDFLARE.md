@@ -82,6 +82,11 @@ Stop it:
 .\scripts\website_tunnel.ps1 -Mode stop
 ```
 
+At logon, `scripts/start_head.ps1` (installed by `install_head_autostart.ps1`) starts the website
+container and the tunnel before the coordinator and model stack, so the static site is reachable
+while the gateway warms up. A Cloudflare 1033 during the first minute after boot or login only means
+the tunnel is still reconnecting.
+
 ## Chat on a PC without the model
 
 The desktop chat uses a local GGUF model when it finds one (`RACON_GGUF_MODEL`, the project path, or
@@ -97,16 +102,28 @@ No manual setup is needed: enrollment issues a per-node gateway key and the app 
 Environment variables `RACON_API_KEY` and `RACON_GATEWAY_URL` take precedence. If every backend fails,
 the chat reply lists each backend and its error.
 
-## Publishing a new installer
+## Publishing a new release
 
-After compiling `dist\installer\RACoN_Setup_v<version>.exe`:
+The site reads a unified `manifest.json` with a `platforms` object. Each platform entry has its own
+`file`, `size_bytes`, `sha256` and `built_at`. Top-level `file`/`sha256` fields are kept for older
+cached site scripts.
+
+Windows (after compiling `dist\installer\RACoN_Setup_v<version>.exe`):
 
 ```powershell
-.\scripts\publish_website.ps1 -Version 0.1.0
+.\scripts\publish_website.ps1 -Version 1.0.6
 ```
 
-This copies only the current installer to `dist\website_downloads`, writes `manifest.json` with its SHA-256, and the
-page picks it up without a container rebuild.
+Linux/Ubuntu (after `./scripts/build_linux.sh`):
+
+```bash
+./scripts/publish_website.sh --version 1.0.6 --linux
+```
+
+Each publisher copies its artifact to `dist/website_downloads`, computes SHA-256, and merges its
+platform entry without deleting the other platform's file. The page picks the change up without a
+container rebuild. Visitors see both downloads, and the page marks the one matching their OS as
+recommended.
 
 ## Known limits
 

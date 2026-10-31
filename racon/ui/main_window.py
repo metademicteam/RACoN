@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QTabWidget, QStatusBar, QLabel,
 )
 
+from racon.config import VERSION
 from racon.scheduler.models import (
     SchedulerResult, SchedulingObjective, SchedulingMode,
 )
@@ -33,7 +34,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RACoN v1.0.1 — Resource-Aware Compute Orchestration")
+        self.setWindowTitle(f"RACoN v{VERSION} — Resource-Aware Compute Orchestration")
         self.setMinimumSize(1000, 700)
         self.resize(1200, 800)
         self.setStyleSheet(DARK_STYLESHEET)

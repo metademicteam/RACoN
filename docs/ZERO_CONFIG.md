@@ -11,12 +11,14 @@ invite code, API key, or `cluster.json` edit is required.
 2. **RPC endpoint.** The agent binds `rpc-server` to its Tailscale IP (LAN IP if Tailscale is absent,
    never `0.0.0.0`) and reports `<ip>:50052` during enrollment.
 3. **Gateway key.** The coordinator issues a per-node gateway API key. The app writes
-   `%LOCALAPPDATA%\RACoN\racon\gateway.json`, so chat works even without a local model.
+   `gateway.json` in the per-user data folder (`%LOCALAPPDATA%\RACoN` on Windows,
+   `~/.local/share/RACoN` on Linux), so chat works even without a local model.
 4. **Cluster discovery.** On the head PC, `racon.cluster serve` reads approved nodes from the
    coordinator's loopback admin API and rebuilds the RPC worker list. It replans when a worker joins
    or drops. `cluster.json` workers are only a fallback.
-5. **Autostart.** The installer's Startup shortcut launches `RACoN.exe --autostart` at logon. The window
-   stays hidden in the tray while the worker runs.
+5. **Autostart.** On Windows the installer's Startup shortcut launches `RACoN.exe --autostart` at logon;
+   on Linux the XDG autostart entry does the same. The window stays hidden in the tray while the worker runs.
+   Ubuntu Server nodes use `racon --headless` (or the packaged systemd user service) instead.
 
 ## Operator controls
 
@@ -27,7 +29,9 @@ invite code, API key, or `cluster.json` edit is required.
 | Point clients at another coordinator | Set `RACON_COORDINATOR_URL` on clients |
 | Revoke a node | `POST http://127.0.0.1:8766/admin/nodes/<node_id>/revoke` |
 | Revoke a node's gateway key | `python -m racon.cluster keys revoke <id>` |
-| Turn off autostart | Delete `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\RACoN.lnk` |
+| Turn off autostart | Windows: delete `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\RACoN.lnk`. Linux: delete `~/.config/autostart/racon.desktop`. |
+| Run without a desktop (Ubuntu Server) | `racon --headless`, or `systemctl --user enable --now racon-worker.service` |
+| Allow the RPC port on Ubuntu | `sudo ufw allow 50052/tcp` |
 | Disable auto-connect per run | Set `RACON_AUTO_CONNECT=0` |
 
 ## After a reboot on the head PC

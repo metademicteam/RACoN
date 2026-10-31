@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RACoN — Resource-Aware Collaborative Network</title>
-  <meta name="description" content="RACoN coordinates compute across Windows PCs for local-first distributed AI inference. Download the Windows installer or call the public API.">
+  <meta name="description" content="RACoN coordinates compute across Windows and Ubuntu PCs for local-first distributed AI inference. Download the Windows installer or the Ubuntu/Linux build, or call the public API.">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -24,11 +24,12 @@
       <p class="eyebrow">Resource-Aware Collaborative Network</p>
       <h1>Pool your PCs for local-first AI inference.</h1>
       <p class="lead">
-        RACoN runs one model across several Windows PCs. Each machine keeps its own memory, and the scheduler splits the
-        model's layers by each PC's free capacity. If a worker goes offline, its layers move back to the main PC.
+        RACoN runs one model across Windows and Ubuntu machines in the same cluster. Each computer keeps its own
+        memory, and the scheduler splits the model's layers by each PC's free capacity. If a worker goes offline,
+        its layers move back to the head PC.
       </p>
       <div class="actions">
-        <a class="btn" href="#download">Download for Windows</a>
+        <a class="btn" href="#download">Download RACoN</a>
         <a class="btn btn-ghost" href="#api">Use the API</a>
       </div>
     </section>
@@ -37,14 +38,20 @@
       <h2>What RACoN is</h2>
       <div class="grid">
         <article class="card">
+          <h3>One cluster, two operating systems</h3>
+          <p>Windows and Ubuntu workers enroll the same way, advertise the same RPC endpoint, and are scheduled
+            by the same head. Mix desktop PCs and headless Ubuntu servers in one cluster.</p>
+        </article>
+        <article class="card">
           <h3>Local-first desktop app</h3>
-          <p>A native Windows app (PySide6) with hardware telemetry, a scheduler lab, benchmark history and a chat panel.
-            Everything runs on your machine by default.</p>
+          <p>A native app with hardware telemetry, a scheduler lab, benchmark history and a chat panel.
+            Everything runs on your machine by default. Ubuntu Server installs can run headless with
+            <code>racon --headless</code>.</p>
         </article>
         <article class="card">
           <h3>Honest metrics</h3>
-          <p>Hardware that does not expose real numbers, such as the Intel UHD 630 GPU, reports <em>Unavailable</em>
-            instead of a made-up figure. Simulated results are labeled as simulated.</p>
+          <p>Hardware that does not expose real numbers reports <em>Unavailable</em> instead of a made-up figure.
+            Simulated results are labeled as simulated.</p>
         </article>
         <article class="card">
           <h3>Safe by design</h3>
@@ -57,30 +64,57 @@
     <section id="how">
       <h2>How it works</h2>
       <ol class="steps">
-        <li><strong>Install</strong> the Windows installer on each PC. It installs per-user and needs no admin rights.</li>
-        <li><strong>Join</strong> the cluster over Tailscale. Workers expose only a single Tailscale address for layer traffic.</li>
-        <li><strong>Serve</strong> the model. The head PC measures each device and assigns layers in proportion to free memory.</li>
+        <li><strong>Install</strong> on each PC: the Windows installer or the Ubuntu tarball/.deb. Both install
+          per-user and need no administrator rights.</li>
+        <li><strong>Join</strong> the cluster over Tailscale. Windows and Ubuntu workers expose only a single
+          Tailscale address for layer traffic.</li>
+        <li><strong>Serve</strong> the model on the head PC. It measures every device, including Linux workers,
+          and assigns layers in proportion to free memory.</li>
         <li><strong>Call</strong> the OpenAI-compatible API at <code>racon.metademic.org/v1</code> with an API key.</li>
       </ol>
-      <p class="note">Model weights and activations never travel over the public internet. Only API requests and responses do.
-        Multiple PCs do not form a single pooled RAM or VRAM space.</p>
+      <p class="note">Use the same llama.cpp release on every node: the RPC protocol checks versions between the
+        head and workers. Layer traffic stays on Tailscale or a private LAN; only API requests cross the public
+        internet. Multiple PCs do not form a single pooled RAM or VRAM space.</p>
     </section>
 
     <section id="download">
       <h2>Download</h2>
-      <div class="card download">
-        <div>
+      <div class="downloads">
+        <article class="card download" id="win-card">
+          <span class="platform-tag" id="win-badge">Windows</span>
           <h3>RACoN for Windows (x64)</h3>
-          <p>Installer v1.0.1. Installs to <code>%LOCALAPPDATA%\Programs\RACoN</code>. No administrator rights needed.</p>
-          <p class="muted" id="installer-meta">Size and checksum load below.</p>
-        </div>
-        <a class="btn" id="download-btn" href="/downloads/RACoN_Setup_v1.0.1.exe" download>Download RACoN_Setup_v1.0.1.exe</a>
+          <p>Installer. Installs to <code>%LOCALAPPDATA%\Programs\RACoN</code>. No administrator rights needed.</p>
+          <p class="muted" id="win-meta">Size and checksum load below.</p>
+          <a class="btn" id="win-btn" href="/downloads/RACoN_Setup_v1.0.1.exe" download>Download for Windows</a>
+          <details class="verify">
+            <summary>Verify the Windows download</summary>
+            <p>Compare the SHA-256 hash of the file you downloaded with the value below.</p>
+            <pre id="win-sha">loading…</pre>
+          </details>
+        </article>
+
+        <article class="card download" id="linux-card">
+          <span class="platform-tag" id="linux-badge">Ubuntu / Linux</span>
+          <h3>RACoN for Ubuntu / Linux (x86_64)</h3>
+          <p>Portable tarball with a per-user installer. Requires Ubuntu 24.04+ (glibc 2.38); the llama.cpp runtime ships with its own libraries.</p>
+          <p class="muted">v1.0.6 downloads and verifies the worker's model layer shard in the background, with progress in the Worker Agent log. It also includes the CPU + RPC load fix, session refresh, and portable CPU backends.</p>
+          <pre class="install-lines"><code id="linux-install">tar -xzf RACoN-linux-x86_64-v1.0.6.tar.gz
+cd RACoN-linux-x86_64-v1.0.6
+./install.sh          # desktop app, no root
+racon                 # launch
+racon --headless      # Ubuntu Server worker</code></pre>
+          <p class="muted" id="linux-meta">Size and checksum load below.</p>
+          <a class="btn" id="linux-btn" href="/downloads/RACoN-linux-x86_64-v1.0.6.tar.gz" download>Download for Ubuntu</a>
+          <p class="muted" id="linux-deb-wrap" hidden>
+            or install the package: <a id="linux-deb" href="#">racon.deb</a>
+          </p>
+          <details class="verify">
+            <summary>Verify the Linux download</summary>
+            <p>Compare the SHA-256 hash of the tarball with the value below.</p>
+            <pre id="linux-sha">loading…</pre>
+          </details>
+        </article>
       </div>
-      <details class="verify">
-        <summary>Verify the download</summary>
-        <p>Compare the SHA-256 hash of the file you downloaded with the value below.</p>
-        <pre id="installer-sha">loading…</pre>
-      </details>
     </section>
 
     <section id="api">
@@ -112,6 +146,7 @@
         <li>Source: <a href="https://github.com/metademicteam/RACoN">github.com/metademicteam/RACoN</a></li>
         <li>License: see the LICENSE file in the repository</li>
         <li>Docs: architecture, security model, ADRs and the cluster runbook are in the repository <code>docs/</code> folder</li>
+        <li>Linux build guide: <code>docs/BUILD_LINUX.md</code></li>
       </ul>
     </section>
   </main>

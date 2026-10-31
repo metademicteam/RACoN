@@ -7,6 +7,7 @@ from __future__ import annotations
 import functools
 import http.server
 import os
+import shutil
 import socket
 import socketserver
 import subprocess
@@ -101,18 +102,20 @@ def main():
     else:
         app_url = "http://127.0.0.1:1420/"
 
-    # Locate application icon
+    # Locate application icon (PNG works across Windows, Linux and macOS)
     meipass = getattr(sys, "_MEIPASS", "")
-    icon_candidates = [
-        Path(meipass) / "apps" / "desktop" / "icon.ico" if meipass else None,
-        Path(__file__).resolve().parent / "apps" / "desktop" / "icon.ico",
-        Path.cwd() / "apps" / "desktop" / "icon.ico",
-        Path(sys.executable).parent / "apps" / "desktop" / "icon.ico",
-        Path(sys.executable).parent / "_internal" / "apps" / "desktop" / "icon.ico",
-    ]
+    icon_candidates = []
+    for name in ("icon.png", "icon.ico"):
+        icon_candidates.extend([
+            Path(meipass) / "apps" / "desktop" / name if meipass else None,
+            Path(__file__).resolve().parent / "apps" / "desktop" / name,
+            Path.cwd() / "apps" / "desktop" / name,
+            Path(sys.executable).parent / "apps" / "desktop" / name,
+            Path(sys.executable).parent / "_internal" / "apps" / "desktop" / name,
+        ])
     icon_path = next((p for p in icon_candidates if p and p.exists()), None)
 
-    # 3. Try pywebview for native WebView2 desktop application window
+    # 3. Try pywebview for a native desktop window (WebView2 on Windows, WebKitGTK/Qt on Linux)
     try:
         import webview
 
@@ -130,18 +133,33 @@ def main():
     except Exception as e:
         print(f"pywebview window init failed ({e}), falling back to native app mode...")
 
-    # 4. Fallback to Windows native WebView2 / Edge App Mode
-    # --app mode runs without browser UI, tabs, or address bar as an independent native window
-    edge_paths = [
-        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
-        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
-        os.path.expandvars(r"%LocalAppData%\Microsoft\Edge\Application\msedge.exe"),
-    ]
-    edge_exe = next((p for p in edge_paths if os.path.exists(p)), None)
+    # 4. Fall back to a Chromium-based app window, then the default browser.
+    # --app mode runs without browser UI, tabs, or address bar as an independent native window.
+    browser_candidates = []
+    if os.name == "nt":
+        browser_candidates = [
+            os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+            os.path.expandvars(r"%LocalAppData%\Microsoft\Edge\Application\msedge.exe"),
+        ]
+    else:
+        browser_candidates = [
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+            "/usr/bin/microsoft-edge",
+        ]
+    browser_exe = next((p for p in browser_candidates if os.path.exists(p)), None)
+    if not browser_exe:
+        for name in ("chromium", "chromium-browser", "google-chrome", "microsoft-edge"):
+            found = shutil.which(name)
+            if found:
+                browser_exe = found
+                break
 
-    if edge_exe:
+    if browser_exe:
         cmd = [
-            edge_exe,
+            browser_exe,
             f"--app={app_url}",
             "--window-size=1280,840",
             "--app-id=racon.desktop",

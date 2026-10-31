@@ -34,6 +34,33 @@ def test_enroll_strips_trailing_slash_and_enroll_suffix(monkeypatch):
         assert seen["url"] == "https://example.test/enroll"
 
 
+def test_enroll_5xx_reports_coordinator_offline(monkeypatch):
+    agent = _agent()
+
+    class Response:
+        status_code = 502
+        reason_phrase = "Bad Gateway"
+        text = ""
+
+        def json(self):
+            raise ValueError("not json")
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, **kwargs):
+            return Response()
+
+    monkeypatch.setattr(httpx, "Client", lambda *args, **kwargs: Client())
+    assert agent.enroll("RCN-ABCDEF123456") is False
+    assert "Coordinator unavailable" in agent.status.last_error
+    assert "head node may be offline" in agent.status.last_error
+
+
 def test_worker_api_root_explains_service():
     priv, pub = generate_keypair()
     registry = NodeRegistry(coordinator_public_key_hex=pub.hex() if isinstance(pub, bytes) else pub)

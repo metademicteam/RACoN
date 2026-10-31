@@ -37,7 +37,10 @@ from racon.runtime.rpc_worker import DistributedPipelineEngine
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_GGUF_MODEL = r"F:\RACoN\Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf"
+DEFAULT_GGUF_MODEL = str(
+    Path(__file__).resolve().parents[2]
+    / "Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf"
+)
 DEFAULT_GATEWAY_URL = "https://racon.metademic.org"
 
 
@@ -72,7 +75,7 @@ def resolve_local_model_path() -> Optional[str]:
 
 
 def gateway_config() -> Tuple[Optional[str], Optional[str]]:
-    """Remote gateway URL and API key from environment or %LOCALAPPDATA%\\RACoN\\racon\\gateway.json."""
+    """Remote gateway URL and API key from environment or gateway.json in the RACoN data folder."""
     url = os.environ.get("RACON_GATEWAY_URL")
     key = os.environ.get("RACON_API_KEY")
     if url and key:
@@ -268,39 +271,53 @@ class InferenceWorker(QThread):
         # 2. Remote RACoN gateway with an API key (env or gateway.json)
         gw_url, gw_key = gateway_config()
         if gw_url and gw_key:
-            try:
+            # A worker joining or leaving restarts llama-server on the head. The gateway answers
+            # 503 "Loading model" during that window; wait it out instead of falling back.
+            retry_deadline = time.time() + 120.0
+            while True:
+                emitted: List[str] = []
+
                 def _handle_gw_token(tok: str):
+                    emitted.append(tok)
                     self.token_generated.emit(tok)
 
-                content, extra = _chat_stream_request(
-                    gw_url, gw_key, self.model_name, self.messages,
-                    self.max_tokens, self.temperature,
-                    on_token=_handle_gw_token,
-                    is_cancelled=lambda: self._is_cancelled,
-                )
-                if not content:
-                    # Fallback to non-streaming if stream yielded no tokens
-                    data = _chat_request(gw_url, gw_key, self.model_name, self.messages,
-                                         self.max_tokens, self.temperature)
-                    content = data["choices"][0]["message"]["content"]
-                    extra = {"eval_tokens": len(content.split())}
+                try:
+                    content, extra = _chat_stream_request(
+                        gw_url, gw_key, self.model_name, self.messages,
+                        self.max_tokens, self.temperature,
+                        on_token=_handle_gw_token,
+                        is_cancelled=lambda: self._is_cancelled,
+                    )
+                    if not content:
+                        # Fallback to non-streaming if stream yielded no tokens
+                        data = _chat_request(gw_url, gw_key, self.model_name, self.messages,
+                                             self.max_tokens, self.temperature)
+                        content = data["choices"][0]["message"]["content"]
+                        extra = {"eval_tokens": len(content.split())}
 
-                duration = time.time() - start_time
-                eval_tokens = extra.get("eval_tokens", len(content.split()))
-                stats = {
-                    "prompt_tps": 0.0,
-                    "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
-                    "duration_s": round(duration, 2),
-                    "device": f"Remote Gateway ({gw_url})",
-                    "memory": {},
-                }
-                self.completed.emit(content, stats)
-                return
-            except Exception as e:
-                logger.warning("Remote gateway failed: %s", e)
-                reasons.append(f"remote gateway {gw_url}: {e}")
+                    duration = time.time() - start_time
+                    eval_tokens = extra.get("eval_tokens", len(content.split()))
+                    stats = {
+                        "prompt_tps": 0.0,
+                        "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
+                        "duration_s": round(duration, 2),
+                        "device": f"Remote Gateway ({gw_url})",
+                        "memory": {},
+                    }
+                    self.completed.emit(content, stats)
+                    return
+                except Exception as e:
+                    message = str(e)
+                    loading = "loading model" in message.lower()
+                    if loading and not emitted and not self._is_cancelled and time.time() < retry_deadline:
+                        logger.info("Remote gateway is loading the model; retrying in 5s.")
+                        time.sleep(5.0)
+                        continue
+                    logger.warning("Remote gateway failed: %s", e)
+                    reasons.append(f"remote gateway {gw_url}: {e}")
+                    break
         else:
-            reasons.append("no remote gateway configured (set RACON_API_KEY or %LOCALAPPDATA%\\RACoN\\racon\\gateway.json)")
+            reasons.append("no remote gateway configured (set RACON_API_KEY or enroll this PC to write gateway.json)")
 
         # 3. Local backend on this PC (OpenAI-compatible, usually backed by Ollama)
         try:
@@ -496,7 +513,7 @@ class ChatPanel(QWidget):
             <h2 style="color: #cba6f7; margin-bottom: 6px;">Welcome to RACoN Chat</h2>
             <p style="color: #a6adc8; font-size: 13px; max-width: 600px; margin: auto;">
                 Chat with on-device models, quantized GGUF weights, or distributed RPC worker clusters.
-                Your prompts remain private and processed locally on your Windows PC.
+                Your prompts remain private and are processed on your own PC or your cluster.
             </p>
         </div>
         """

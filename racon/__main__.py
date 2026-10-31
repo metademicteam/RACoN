@@ -3,20 +3,55 @@ import sys
 import logging
 from pathlib import Path
 
+from racon.config import VERSION
+
 
 def _icon_path() -> Path:
     """Locate the application icon in dev and frozen builds."""
     meipass = getattr(sys, "_MEIPASS", "")
-    candidates = [
-        Path(meipass) / "apps" / "desktop" / "icon.ico" if meipass else None,
-        Path(sys.executable).resolve().parent / "apps" / "desktop" / "icon.ico",
-        Path(__file__).resolve().parents[1] / "apps" / "desktop" / "icon.ico",
-        Path(meipass) / "icon.ico" if meipass else None,
-    ]
+    candidates = []
+    for name in ("icon.png", "icon.ico"):
+        candidates.extend([
+            Path(meipass) / "apps" / "desktop" / name if meipass else None,
+            Path(sys.executable).resolve().parent / "apps" / "desktop" / name,
+            Path(__file__).resolve().parents[1] / "apps" / "desktop" / name,
+            Path(meipass) / name if meipass else None,
+        ])
     for candidate in candidates:
         if candidate and candidate.exists():
             return candidate
-    return Path("icon.ico")
+    return Path("icon.png")
+
+
+def _run_headless() -> int:
+    """Join the cluster and serve RPC tasks without a GUI (Ubuntu Server, systemd)."""
+    import threading
+    import time
+
+    from racon.agent.worker import RaconAgent
+
+    agent = RaconAgent()
+    delay = 5.0
+    try:
+        while True:
+            ok, message = agent.auto_connect()
+            print(message, file=sys.stdout if ok else sys.stderr, flush=True)
+            if ok:
+                break
+            print(f"Retrying in {delay:.0f}s...", file=sys.stderr, flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
+    except KeyboardInterrupt:
+        return 0
+
+    agent.start()
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        agent.stop()
+    return 0
 
 
 def main():
@@ -27,7 +62,10 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     logger = logging.getLogger("racon")
-    logger.info("RACoN v1.0.1 starting")
+    logger.info("RACoN v%s starting", VERSION)
+
+    if "--headless" in sys.argv:
+        sys.exit(_run_headless())
 
     try:
         from PySide6.QtWidgets import QApplication
@@ -39,13 +77,14 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("RACoN")
-    app.setApplicationVersion("1.0.1")
+    app.setApplicationVersion(VERSION)
     app.setOrganizationName("RACoN")
 
     window = RaconApp()
 
     if "--autostart" in sys.argv:
-        # Started at Windows logon: keep the worker running in the tray without a window.
+        # Started at desktop login (Windows Startup or Linux XDG autostart): keep the worker
+        # running in the tray without a window.
         from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 

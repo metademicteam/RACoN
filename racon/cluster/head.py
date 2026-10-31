@@ -12,7 +12,7 @@ import httpx
 
 from racon.cluster.config import ClusterConfig, WorkerEndpoint
 from racon.cluster.planner import Plan
-from racon.runtime.distributed_gguf import find_llama_tool
+from racon.runtime.distributed_gguf import find_llama_tool, llama_install_hint, llama_process_env
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +26,20 @@ def build_head_command(
 ) -> List[str]:
     """Build the llama-server command. When a plan is given, the RPC list and -ts ratios come from it."""
     workers = cfg.workers if active_workers is None else active_workers
+    # A mixed GPU + RPC tensor split can stall at model load (Vulkan/CUDA device plus RPC0).
+    # Run the head on CPU whenever layers are offloaded to workers so loading completes.
+    n_gpu_layers = 0 if workers else cfg.n_gpu_layers
+    if workers and cfg.n_gpu_layers:
+        logger.warning(
+            "RPC workers are active; forcing -ngl 0 on the head to avoid a mixed GPU/RPC load stall."
+        )
     cmd = [
         server_bin,
         "-m", cfg.model_path,
         "--alias", cfg.model_alias,
         "--host", cfg.head_host,
         "--port", str(cfg.head_port),
-        "-ngl", str(cfg.n_gpu_layers),
+        "-ngl", str(n_gpu_layers),
         "-c", str(cfg.context_size),
         "-t", str(cfg.threads),
         "--no-webui",
@@ -76,7 +83,7 @@ class HeadServer:
             return
         server_bin = find_llama_tool("llama-server")
         if not server_bin:
-            raise RuntimeError("llama-server executable not found. Install llama.cpp (winget install ggml.llamacpp).")
+            raise RuntimeError(f"llama-server executable not found. {llama_install_hint().capitalize()}.")
         if not os.path.exists(self.cfg.model_path):
             raise FileNotFoundError(f"Model not found: {self.cfg.model_path}")
 
@@ -85,11 +92,19 @@ class HeadServer:
             self.active_workers = list(active_workers)
         cmd = build_head_command(self.cfg, server_bin, self.internal_key, plan=self.plan, active_workers=self.active_workers)
         logger.info("Starting llama-server head: %s", " ".join(c if c != self.internal_key else "***" for c in cmd))
+        if not self.log_path:
+            from racon.config import get_log_dir
+            self.log_path = str(get_log_dir() / "llama-server.log")
         out: Any = subprocess.DEVNULL
-        if self.log_path:
+        try:
             self._log_handle = open(self.log_path, "w", encoding="utf-8")
             out = self._log_handle
-        self._process = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out)
+        except OSError as exc:
+            logger.warning("Could not open llama-server log %s: %s", self.log_path, exc)
+            self.log_path = None
+        self._process = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=out, env=llama_process_env()
+        )
         self._wait_ready(startup_timeout)
 
     def _wait_ready(self, timeout: float) -> None:

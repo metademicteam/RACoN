@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 _RPC_LINE = re.compile(r"^\s*RPC\d+:\s*(\S+)\s*\(\s*([\d.]+)\s*MiB,\s*([\d.]+)\s*MiB free\)")
-_LOCAL_LINE = re.compile(r"^\s*([A-Za-z]+\d+):\s*.*?\(\s*([\d.]+)\s*MiB,\s*([\d.]+)\s*MiB free\)")
+# Device names differ by backend: Vulkan0/CUDA0 on Windows, CPU/Metal/ROCM0 on Linux/macOS.
+_LOCAL_LINE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_]*\d*):\s*.*?\(\s*([\d.]+)\s*MiB,\s*([\d.]+)\s*MiB free\)")
 
 
 @dataclass(frozen=True)

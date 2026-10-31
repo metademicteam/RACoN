@@ -8,15 +8,42 @@ from __future__ import annotations
 import logging
 import os
 import re
+import signal
 import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from racon.runtime.distributed_gguf import find_llama_tool
+from racon.runtime.distributed_gguf import find_llama_tool, llama_process_env
 
 logger = logging.getLogger(__name__)
+
+
+def describe_rpc_exit(code: int) -> str:
+    """Explain an rpc-server exit code, including POSIX signals such as SIGILL."""
+    if code < 0:
+        try:
+            name = signal.Signals(-code).name
+        except ValueError:
+            name = f"signal {-code}"
+        hint = ""
+        if name == "SIGILL":
+            hint = (
+                " The CPU does not support an instruction used by this llama.cpp build; "
+                "install RACoN v1.0.4 or newer, which includes portable CPU backends."
+            )
+        elif name == "SIGSEGV":
+            hint = " The process crashed with a segmentation fault."
+        elif name == "SIGABRT":
+            hint = " The process aborted."
+        return f"rpc-server was killed by {name} (exit {code}).{hint}"
+    if code == 0xC000001D:
+        return (
+            "rpc-server was killed by an illegal instruction (0xC000001D). "
+            "The CPU does not support this llama.cpp build."
+        )
+    return f"rpc-server exited with code {code}."
 
 
 @dataclass
@@ -52,17 +79,54 @@ class RpcServerProcess:
         self._process: Optional[subprocess.Popen] = None
         self._bin_path: Optional[str] = None
         self._log_handle: Optional[Any] = None
+        self.last_error: Optional[str] = None
+        self.log_path: Optional[str] = log_file
+
+    def _close_log(self) -> None:
+        if self._log_handle is not None:
+            try:
+                self._log_handle.close()
+            except Exception:
+                pass
+            self._log_handle = None
+
+    def _log_tail(self, lines: int = 12) -> str:
+        """Return the last lines written by rpc-server, for actionable error messages."""
+        if not self.log_path:
+            return ""
+        try:
+            with open(self.log_path, "r", encoding="utf-8", errors="replace") as fh:
+                content = [line.rstrip() for line in fh if line.strip()]
+            return " | ".join(content[-lines:])
+        except OSError:
+            return ""
+
+    def _fail(self, message: str) -> bool:
+        self.last_error = message
+        logger.error(message)
+        if self._process is not None and self._process.poll() is None:
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=2.0)
+            except Exception:
+                pass
+        self._close_log()
+        self._process = None
+        return False
 
     def start(self) -> bool:
-        """Start the rpc-server process without pipe deadlocks."""
+        """Start rpc-server and confirm it is actually listening on the requested address."""
+        self.last_error = None
         if self.is_running():
             logger.info("rpc-server already running on %s:%d", self.host, self.port)
             return True
 
         self._bin_path = find_llama_tool("rpc-server")
         if not self._bin_path or not os.path.exists(self._bin_path):
-            logger.error("rpc-server executable not found on system.")
-            return False
+            return self._fail(
+                "rpc-server executable not found. Reinstall RACoN or set RACON_LLAMA_DIR to a "
+                "folder that contains rpc-server."
+            )
 
         cmd = [
             self._bin_path,
@@ -75,10 +139,14 @@ class RpcServerProcess:
 
         logger.info("Starting rpc-server: %s", " ".join(cmd))
         try:
-            if self.log_file:
-                self._log_handle = open(self.log_file, "w", encoding="utf-8")
+            if not self.log_path:
+                from racon.config import get_log_dir
+                self.log_path = str(get_log_dir() / "rpc-server.log")
+            try:
+                self._log_handle = open(self.log_path, "w", encoding="utf-8")
                 out_target = self._log_handle
-            else:
+            except OSError:
+                self.log_path = None
                 out_target = subprocess.DEVNULL
 
             self._process = subprocess.Popen(
@@ -86,32 +154,38 @@ class RpcServerProcess:
                 stdin=subprocess.DEVNULL,
                 stdout=out_target,
                 stderr=out_target,
+                env=llama_process_env(),
             )
-            # Give server 1.5 seconds to bind
-            time.sleep(1.5)
-            if self._process.poll() is not None:
-                logger.error("rpc-server terminated immediately with code %d", self._process.returncode)
-                self._process = None
-                if self._log_handle is not None:
-                    try:
-                        self._log_handle.close()
-                    except Exception:
-                        pass
-                    self._log_handle = None
-                return False
 
-            logger.info("rpc-server successfully running (PID %d) on %s:%d", self._process.pid, self.host, self.port)
-            return True
+            # Wait for the socket, not just for the process to survive. A server that cannot bind
+            # or load a shared library otherwise looks healthy for the first second.
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if self._process.poll() is not None:
+                    code = self._process.returncode
+                    tail = self._log_tail()
+                    detail = f" Last output: {tail}" if tail else ""
+                    return self._fail(f"{describe_rpc_exit(code)}{detail}")
+                if self._check_socket_open(self.host, self.port):
+                    logger.info(
+                        "rpc-server successfully running (PID %d) on %s:%d",
+                        self._process.pid, self.host, self.port,
+                    )
+                    return True
+                time.sleep(0.25)
+
+            tail = self._log_tail()
+            detail = f" Last output: {tail}" if tail else ""
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=2.0)
+            except Exception:
+                pass
+            return self._fail(
+                f"rpc-server did not listen on {self.host}:{self.port} within 5 seconds.{detail}"
+            )
         except Exception as e:
-            logger.error("Failed to start rpc-server: %s", e)
-            self._process = None
-            if self._log_handle is not None:
-                try:
-                    self._log_handle.close()
-                except Exception:
-                    pass
-                self._log_handle = None
-            return False
+            return self._fail(f"Failed to start rpc-server: {e}")
 
     def is_running(self) -> bool:
         """Check if process is active and port is responding."""
@@ -228,6 +302,7 @@ class DistributedPipelineEngine:
                 stderr=subprocess.PIPE,
                 text=True,
                 timeout=timeout_seconds,
+                env=llama_process_env(),
             )
             duration = time.time() - start_time
 

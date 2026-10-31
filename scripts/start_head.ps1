@@ -59,7 +59,24 @@ if ($dockerReady) {
     Write-Warning "Docker Desktop is not running; the website will be unavailable until it starts."
 }
 
-# 2. Coordinator (worker ingress + admin API)
+# 2. Cloudflare tunnel. Start it before the model stack so the public site does not
+# return Cloudflare 1033 while the gateway is still warming up.
+if (Get-Process cloudflared -ErrorAction SilentlyContinue) {
+    Write-Host "[ok] Cloudflare tunnel already running"
+} else {
+    $cfConfig = Join-Path $env:USERPROFILE ".cloudflared\config.yml"
+    if (-not (Test-Path $cfConfig)) {
+        Write-Warning "Missing $cfConfig; run the one-time tunnel setup in docs/WEBSITE_CLOUDFLARE.md"
+    } else {
+        Start-Process -FilePath "cloudflared" -ArgumentList @("tunnel", "--config", $cfConfig, "run", "racon") `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $logDir "cloudflared.log") `
+            -RedirectStandardError (Join-Path $logDir "cloudflared.log.err") | Out-Null
+        Write-Host "[..] Cloudflare tunnel starting"
+    }
+}
+
+# 3. Coordinator (worker ingress + admin API)
 if (Test-Port 8765) {
     Write-Host "[ok] Coordinator already listening on 8765"
 } else {
@@ -74,7 +91,7 @@ if (Test-Port 8765) {
     }
 }
 
-# 3. Model head + public API gateway (llama-server on 8090, gateway on 8000)
+# 4. Model head + public API gateway (llama-server on 8090, gateway on 8000)
 if (Test-Port 8000) {
     Write-Host "[ok] API gateway already listening on 8000"
 } else {
@@ -89,24 +106,11 @@ if (Test-Port 8000) {
     }
 }
 
-# 4. Cloudflare tunnel
-if (Get-Process cloudflared -ErrorAction SilentlyContinue) {
-    Write-Host "[ok] Cloudflare tunnel already running"
+# 5. Verify the public endpoint once the gateway is up.
+if (Wait-Http "https://racon.metademic.org/health" 90) {
+    Write-Host "[ok] Cloudflare tunnel connected; website is live"
 } else {
-    $cfConfig = Join-Path $env:USERPROFILE ".cloudflared\config.yml"
-    if (-not (Test-Path $cfConfig)) {
-        Write-Warning "Missing $cfConfig; run the one-time tunnel setup in docs/WEBSITE_CLOUDFLARE.md"
-    } else {
-        Start-Process -FilePath "cloudflared" -ArgumentList @("tunnel", "--config", $cfConfig, "run", "racon") `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput (Join-Path $logDir "cloudflared.log") `
-            -RedirectStandardError (Join-Path $logDir "cloudflared.log.err") | Out-Null
-        if (Wait-Http "https://racon.metademic.org/health" 90) {
-            Write-Host "[ok] Cloudflare tunnel connected; website is live"
-        } else {
-            Write-Warning "Tunnel not reachable yet; see $logDir\cloudflared.log.err"
-        }
-    }
+    Write-Warning "Public endpoint not reachable yet; see $logDir\cloudflared.log.err"
 }
 
 Write-Host ""

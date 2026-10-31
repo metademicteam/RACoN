@@ -1,4 +1,4 @@
-"""OpenAI-Compatible Chat Completions & Models API (Darkbloom-equivalent for Windows).
+"""OpenAI-Compatible Chat Completions & Models API (Windows and Linux clusters).
 
 Allows any standard OpenAI client (Cursor, LangChain, LlamaIndex, OpenAI Python SDK)
 to query the RACoN cluster directly via http://localhost:8765/v1/chat/completions.
@@ -11,6 +11,7 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
@@ -24,8 +25,28 @@ from ..storage.db import get_database
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["OpenAI Compatibility"])
 
-# Default model path if local GGUF
-DEFAULT_GGUF_MODEL = r"F:\RACoN\Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf"
+# Default model path relative to the repository root; RACON_GGUF_MODEL overrides it on any OS.
+DEFAULT_GGUF_MODEL = str(
+    Path(__file__).resolve().parents[3]
+    / "Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf"
+)
+
+
+def resolve_local_gguf() -> Optional[str]:
+    """Find a local GGUF: env var, repo root, then the per-user models folder."""
+    candidates: List[Path] = []
+    if os.environ.get("RACON_GGUF_MODEL"):
+        candidates.append(Path(os.environ["RACON_GGUF_MODEL"]))
+    candidates.append(Path(DEFAULT_GGUF_MODEL))
+    try:
+        from racon.config import get_data_dir
+        candidates.extend(sorted((get_data_dir() / "models").rglob("*.gguf")))
+    except Exception:
+        pass
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return None
 
 
 class ChatMessage(BaseModel):
@@ -49,7 +70,7 @@ async def list_models() -> Dict[str, Any]:
             "id": "gemma-3-1b",
             "object": "model",
             "created": int(time.time()),
-            "owned_by": "racon-windows",
+            "owned_by": "racon",
             "permission": [],
             "root": "gemma-3-1b",
             "parent": None,
@@ -58,7 +79,7 @@ async def list_models() -> Dict[str, Any]:
             "id": "llama3.2:1b",
             "object": "model",
             "created": int(time.time()),
-            "owned_by": "racon-windows",
+            "owned_by": "racon",
             "permission": [],
             "root": "llama3.2:1b",
             "parent": None,
@@ -67,7 +88,7 @@ async def list_models() -> Dict[str, Any]:
             "id": "qwen2.5:1.5b",
             "object": "model",
             "created": int(time.time()),
-            "owned_by": "racon-windows",
+            "owned_by": "racon",
             "permission": [],
             "root": "qwen2.5:1.5b",
             "parent": None,
@@ -115,12 +136,13 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
 
     # 2. If not Ollama, check if local GGUF (e.g. Gemma-3-1B)
     if not ollama_success:
-        if os.path.exists(DEFAULT_GGUF_MODEL) and ("gemma" in req.model.lower() or "local" in req.model.lower()):
+        local_model = resolve_local_gguf()
+        if local_model and ("gemma" in req.model.lower() or "local" in req.model.lower()):
             from racon.runtime.rpc_worker import DistributedPipelineEngine
             engine = DistributedPipelineEngine()
             # Run single turn on local device
             res = engine.execute(
-                model_path=DEFAULT_GGUF_MODEL,
+                model_path=local_model,
                 rpc_endpoints=[],  # Runs on local Vulkan/CPU device if no remote RPC
                 prompt=prompt,
                 max_tokens=req.max_tokens or 64,
@@ -134,7 +156,7 @@ async def chat_completions(req: ChatCompletionRequest) -> Any:
     # 3. Deterministic fallback if neither runtime responded
     if not ollama_success:
         generated_text = (
-            f"[RACoN Windows Cluster] Received prompt with {len(req.messages)} messages. "
+            f"[RACoN Cluster] Received prompt with {len(req.messages)} messages. "
             f"Active model target: '{req.model}'. Cluster is online and ready for tasks."
         )
         completion_tokens = len(generated_text.split())

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "RACoN — Current System Architecture",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "public-path",
+        "label": "Public request path",
+        "focus": ["visitor", "edge", "gateway", "head", "ubuntu"],
+        "note": "Public API calls terminate at the head and fan out to RPC workers."
+      },
+      {
+        "id": "join-path",
+        "label": "Join and control plane",
+        "focus": ["ubuntu", "funnel", "coordinator", "head"],
+        "note": "A worker enrolls through Funnel; the head discovers it through the admin API."
+      },
+      {
+        "id": "release-path",
+        "label": "Release and storage",
+        "focus": ["site", "edge", "hf", "legacy"],
+        "note": "Installers come from the site volume, shards from Hugging Face, and the old Docker ingress is bypassed."
+      }
+    ]
+  },
+  "components": [
+    { "id": "visitor", "type": "external", "label": "Public client", "sublabel": "browser or OpenAI SDK", "pos": [40, 290], "size": [130, 64], "tag": "internet" },
+    { "id": "edge", "type": "cloud", "label": "Cloudflare edge", "sublabel": "racon.metademic.org", "pos": [220, 290], "size": [140, 64], "tag": "TLS" },
+    { "id": "gateway", "type": "security", "label": "API gateway", "sublabel": ":8000 · keys + rate limits", "pos": [420, 290], "size": [160, 64], "tag": "head PC" },
+    { "id": "head", "type": "backend", "label": "Cluster head", "sublabel": "llama-server :8090", "pos": [640, 290], "size": [170, 70], "tag": "head PC" },
+    { "id": "ubuntu", "type": "backend", "label": "Ubuntu worker", "sublabel": "racon UI · agent · rpc-server :50052", "pos": [880, 290], "size": [200, 80], "tag": "jaz@metademic" },
+    { "id": "site", "type": "frontend", "label": "racon-site", "sublabel": "nginx :8081 · downloads", "pos": [420, 100], "size": [160, 64], "tag": "Docker" },
+    { "id": "coordinator", "type": "backend", "label": "RACoN coordinator", "sublabel": "enroll · heartbeat · tasks", "pos": [640, 500], "size": [170, 70], "tag": "WSL :8765" },
+    { "id": "funnel", "type": "security", "label": "Tailscale Funnel", "sublabel": "desktop-b7l73cl · :443 → 8765", "pos": [880, 500], "size": [200, 70], "tag": "public ingress" },
+    { "id": "hf", "type": "external", "label": "Hugging Face", "sublabel": "Gemma shard downloads", "pos": [1130, 298], "size": [140, 64], "tag": "internet" },
+    { "id": "legacy", "type": "external", "label": "Legacy Docker stack", "sublabel": "racn-coordinator :8443", "pos": [1130, 500], "size": [140, 70], "tag": "bypassed" }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Head PC — Windows + WSL", "wraps": ["site", "gateway", "head", "coordinator", "legacy"], "pad": 20 },
+    { "kind": "security-group", "label": "Public ingress", "wraps": ["visitor", "edge"], "pad": 18 }
+  ],
+  "connections": [
+    { "from": "visitor", "to": "edge", "label": "HTTPS", "variant": "emphasis" },
+    { "from": "edge", "to": "site", "label": "site + downloads" },
+    { "from": "edge", "to": "gateway", "label": "/v1 · /health", "variant": "emphasis", "labelAt": [390, 368] },
+    { "from": "gateway", "to": "head", "label": "proxy", "variant": "emphasis" },
+    { "from": "head", "to": "ubuntu", "label": "RPC layers", "variant": "emphasis" },
+    { "from": "ubuntu", "to": "funnel", "label": "enroll · heartbeat", "variant": "emphasis", "labelAt": [980, 384] },
+    { "from": "funnel", "to": "coordinator", "label": "proxy :8765", "variant": "emphasis" },
+    { "from": "head", "to": "coordinator", "label": "admin :8766 discovery", "variant": "dashed", "labelAt": [725, 374] },
+    { "from": "ubuntu", "to": "hf", "label": "shard download", "variant": "dashed", "labelAt": [1105, 384] },
+    { "from": "funnel", "to": "legacy", "label": "old :8443 route (502)", "variant": "dashed", "labelAt": [1105, 584] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Live Now", "items": ["racon.metademic.org and /health return 200", "Coordinator :8765 is healthy; Funnel now proxies to it", "Ubuntu nodes can enroll and receive gateway keys"] },
+    { "dot": "rose", "title": "Oct 31 Failure Chain", "items": ["Qt worker thread wrote to QTextEdit, causing a segmentation fault", "Funnel pointed at stale Docker :8443, returning enrollment 502", "Hugging Face DNS failed during the shard download"] },
+    { "dot": "emerald", "title": "v1.0.2 Fixes", "items": ["Worker logs cross Qt signals onto the GUI thread", "Auto-connect retries every 60s; headless backs off 5–60s", "Shard downloads retry 3×; Linux tarball and .deb published"] }
+  ]
+}

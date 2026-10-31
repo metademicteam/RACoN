@@ -14,6 +14,7 @@ import os
 import shutil
 import struct
 import subprocess
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -23,44 +24,99 @@ logger = logging.getLogger(__name__)
 # Standard winget search path on Windows
 DEFAULT_WINGET_PATTERN = r"C:\Users\*\AppData\Local\Microsoft\WinGet\Packages\ggml.llamacpp_*\*"
 
+LLAMA_TOOL_MARKERS = ("rpc-server", "llama-server", "llama-cli")
 
-def bundled_llama_dir() -> Optional[Path]:
-    """Folder that holds llama.cpp binaries shipped inside the installer, if any."""
+
+def is_windows() -> bool:
+    return os.name == "nt"
+
+
+def tool_binary_name(tool_name: str, windows: Optional[bool] = None) -> str:
+    """Return a llama.cpp tool's filename for this OS (adds .exe only on Windows)."""
+    if tool_name.endswith(".exe"):
+        return tool_name
+    win = is_windows() if windows is None else windows
+    return f"{tool_name}.exe" if win else tool_name
+
+
+def llama_install_hint() -> str:
+    """Platform-specific instructions for installing llama.cpp."""
+    if is_windows():
+        return "install llama.cpp with 'winget install ggml.llamacpp'"
+    return "install llama.cpp from https://github.com/ggml-org/llama.cpp or reinstall RACoN"
+
+
+def _llama_dir_candidates() -> List[Path]:
     import sys
 
-    candidates = []
+    candidates: List[Path] = []
+    env_dir = os.environ.get("RACON_LLAMA_DIR")
+    if env_dir:
+        candidates.append(Path(env_dir))
     meipass = getattr(sys, "_MEIPASS", "")
     if meipass:
         candidates.append(Path(meipass) / "llama")
     candidates.append(Path(sys.executable).resolve().parent / "llama")
     candidates.append(Path(__file__).resolve().parents[2] / "llama")
-    for c in candidates:
-        if (c / "rpc-server.exe").is_file() or (c / "llama-server.exe").is_file():
-            return c
+    if not is_windows():
+        candidates.extend([
+            Path("/opt/racon/llama"),
+            Path("/opt/llama.cpp/build/bin"),
+            Path.home() / ".local" / "lib" / "racon" / "llama",
+        ])
+    return candidates
+
+
+def bundled_llama_dir() -> Optional[Path]:
+    """Folder that holds llama.cpp binaries shipped inside the installer, if any."""
+    for c in _llama_dir_candidates():
+        if not c.is_dir():
+            continue
+        for marker in LLAMA_TOOL_MARKERS:
+            if (c / marker).is_file() or (c / f"{marker}.exe").is_file():
+                return c
     return None
 
 
 def find_llama_tool(tool_name: str) -> Optional[str]:
     """Find a llama.cpp binary: bundled with the app, then PATH, then the WinGet install."""
-    exe_name = tool_name if tool_name.endswith(".exe") else f"{tool_name}.exe"
+    names = [tool_name]
+    if not tool_name.endswith(".exe"):
+        names.append(f"{tool_name}.exe")
 
     # 1. Binaries shipped with RACoN (installer or PyInstaller bundle)
     bundled = bundled_llama_dir()
-    if bundled and (bundled / exe_name).is_file():
-        return str(bundled / exe_name)
+    if bundled:
+        for name in names:
+            candidate = bundled / name
+            if candidate.is_file():
+                return str(candidate)
 
-    # 2. System PATH
-    found = shutil.which(tool_name) or shutil.which(exe_name)
-    if found and os.path.exists(found):
-        return found
+    # 2. System PATH (covers /usr/bin/rpc-server and ~/.local/bin on Ubuntu)
+    for name in names:
+        found = shutil.which(name)
+        if found and os.path.exists(found):
+            return found
 
-    # 3. Check WinGet Packages directory
-    for m in glob.glob(DEFAULT_WINGET_PATTERN):
-        candidate = os.path.join(m, exe_name)
-        if os.path.isfile(candidate):
-            return candidate
+    # 3. Check WinGet Packages directory (Windows only)
+    if is_windows():
+        for m in glob.glob(DEFAULT_WINGET_PATTERN):
+            for name in names:
+                candidate = os.path.join(m, name)
+                if os.path.isfile(candidate):
+                    return candidate
 
     return None
+
+
+def llama_process_env(base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Environment for llama.cpp child processes, exposing bundled .so files on Linux."""
+    env = dict(os.environ if base is None else base)
+    bundled = bundled_llama_dir()
+    if bundled and not is_windows():
+        old = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = str(bundled) + (os.pathsep + old if old else "")
+    return env
 
 
 @dataclass
@@ -377,18 +433,40 @@ def download_shard(
     h = hashlib.sha256()
     downloaded_bytes = 0
 
-    with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as resp:
-        if resp.status_code != 200:
-            raise RuntimeError(f"Failed to download shard: HTTP {resp.status_code} from {url}")
-        total = int(resp.headers.get("Content-Length", shard.file_size_bytes))
-        with open(tmp_file, "wb") as f:
-            for chunk in resp.iter_bytes(chunk_size=1024 * 512):
-                if chunk:
-                    f.write(chunk)
-                    h.update(chunk)
-                    downloaded_bytes += len(chunk)
-                    if progress_callback:
-                        progress_callback(downloaded_bytes, total)
+    last_error: Optional[Exception] = None
+    for attempt in range(1, 4):
+        h = hashlib.sha256()
+        downloaded_bytes = 0
+        try:
+            with httpx.stream("GET", url, follow_redirects=True, timeout=60.0) as resp:
+                if resp.status_code != 200:
+                    raise RuntimeError(f"Failed to download shard: HTTP {resp.status_code} from {url}")
+                total = int(resp.headers.get("Content-Length", shard.file_size_bytes))
+                with open(tmp_file, "wb") as f:
+                    for chunk in resp.iter_bytes(chunk_size=1024 * 512):
+                        if chunk:
+                            f.write(chunk)
+                            h.update(chunk)
+                            downloaded_bytes += len(chunk)
+                            if progress_callback:
+                                progress_callback(downloaded_bytes, total)
+            last_error = None
+            break
+        except (httpx.TransportError, OSError) as exc:
+            last_error = exc
+            if tmp_file.exists():
+                tmp_file.unlink()
+            if attempt == 3:
+                break
+            logger.warning(
+                "Shard download attempt %d/3 failed: %s. Retrying...", attempt, exc
+            )
+            time.sleep(1.5 * attempt)
+
+    if last_error is not None:
+        raise RuntimeError(
+            f"Could not download {shard.filename} after 3 attempts: {last_error}"
+        ) from last_error
 
     actual_sha = h.hexdigest()
     if actual_sha.lower() != shard.sha256.lower():

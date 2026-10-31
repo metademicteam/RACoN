@@ -81,11 +81,34 @@ class HardwareSnapshot:
         return data
 
 
+def _linux_cpu_name() -> Optional[str]:
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.lower().startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _linux_gpu_name() -> Optional[str]:
+    try:
+        result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if any(k in line.lower() for k in ("vga compatible controller", "3d controller", "display controller")):
+                    return line.split(":", 2)[-1].strip()
+    except Exception:
+        pass
+    return None
+
+
 def get_cpu_name() -> str:
     """Retrieve the authentic CPU brand string.
 
-    Uses Windows Registry on Windows systems for the exact processor model,
-    falling back to platform.processor() or 'Unknown'.
+    Uses Windows Registry on Windows and /proc/cpuinfo on Linux, falling back to
+    platform.processor() or 'Unknown'.
     """
     try:
         if platform.system() == "Windows":
@@ -102,6 +125,11 @@ def get_cpu_name() -> str:
                 return " ".join(str(raw_name).strip().split())
     except Exception as e:
         logger.debug("Windows registry CPU lookup failed: %s", e)
+
+    if platform.system() == "Linux":
+        name = _linux_cpu_name()
+        if name:
+            return name
 
     # Fallback to platform processor
     fallback = platform.processor()
@@ -149,7 +177,28 @@ def detect_gpu() -> GpuInfo:
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
         logger.debug("nvidia-smi inspection not available or failed: %s", e)
 
-    # 2. Attempt Windows WMI / CIM query for display controller identity
+    # 2. Linux: identify the GPU through lspci without fabricating metrics
+    if platform.system() == "Linux":
+        gpu_name = _linux_gpu_name()
+        if gpu_name:
+            gpu.name = gpu_name
+            gpu.detection_method = "lspci"
+            name_lower = gpu_name.lower()
+            if "intel" in name_lower:
+                gpu.vendor = "Intel"
+            elif "amd" in name_lower or "radeon" in name_lower:
+                gpu.vendor = "AMD"
+            elif "nvidia" in name_lower:
+                gpu.vendor = "NVIDIA"
+            else:
+                gpu.vendor = "Unknown"
+            gpu.supported = False
+            gpu.vram_total_mb = None
+            gpu.vram_used_mb = None
+            gpu.utilization_pct = None
+            return gpu
+
+    # 3. Attempt Windows WMI / CIM query for display controller identity
     if platform.system() == "Windows":
         try:
             creation_flags = 0x08000000

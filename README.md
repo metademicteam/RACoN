@@ -5,7 +5,7 @@
 ---
 
 ## 1. Overview
-RACoN is a local-first platform designed to aggregate, manage, and coordinate CPU, GPU, and memory resources for distributed AI execution.
+RACoN is a local-first platform designed to aggregate, manage, and coordinate CPU, GPU, and memory resources for distributed AI execution across **Windows and Ubuntu/Linux** machines in one cluster.
 The platform integrates:
 1. **Desktop Management Application**: Built with **Tauri v2 + React 18 (TypeScript, Vite, TailwindCSS)**.
 2. **Local Coordinator Backend**: High-performance **FastAPI** service bound strictly to loopback (`127.0.0.1:8765`) protected by an ephemeral authorization token.
@@ -20,10 +20,12 @@ The platform integrates:
 ## 2. Quick Start
 
 ### 2.1 Prerequisites
-- **Windows 11 (64-bit)**
+- **Windows 11 (64-bit)** or **Ubuntu 24.04+ (x86_64)** (build on 22.04 for 22.04 support)
 - **Python 3.12**
 - **Node.js v20+**
-- **Rust (rustc/cargo 1.80+)**
+- **Rust (rustc/cargo 1.80+)** — only for the Tauri frontend
+- **llama.cpp** with RPC enabled (`rpc-server`, `llama-server`, `llama-cli`)
+- *(Optional)* **Tailscale** to connect machines over a private mesh
 - *(Optional)* **Ollama** running locally at `http://127.0.0.1:11434`
 - *(Optional)* `laya` package (`pip install laya`)
 
@@ -49,6 +51,19 @@ or via PowerShell:
 cd apps\desktop
 npm run tauri dev
 ```
+
+#### Option C: Ubuntu / Linux
+```bash
+# Native desktop app (PySide6), or a headless cluster worker
+./scripts/build_linux.sh
+tar -xzf dist/installer/RACoN-linux-x86_64-v1.0.6.tar.gz
+cd RACoN-linux-x86_64-v1.0.6
+./install.sh
+racon                 # desktop app
+racon --headless      # Ubuntu Server worker
+```
+See [`docs/BUILD_LINUX.md`](docs/BUILD_LINUX.md) for llama.cpp, `.deb` packaging, Tailscale and
+cross-OS cluster setup.
 
 ---
 
@@ -117,5 +132,6 @@ All 80 unit and integration tests cover:
 - [`docs/DISTRIBUTED_RUNTIME.md`](docs/DISTRIBUTED_RUNTIME.md) — Worker protocol and execution mode boundaries.
 - [`docs/TAILSCALE_DOCKER.md`](docs/TAILSCALE_DOCKER.md) — Tailscale mesh remote access and Docker container deployment guide.
 - [`docs/BUILD_WINDOWS.md`](docs/BUILD_WINDOWS.md) — Windows packaging and installer compilation.
+- [`docs/BUILD_LINUX.md`](docs/BUILD_LINUX.md) — Ubuntu/Linux build, install, headless worker and cross-OS cluster.
 - [`docs/ZERO_CONFIG.md`](docs/ZERO_CONFIG.md) — Auto-join, autostart, gateway keys and cluster discovery.
 - [`CHANGELOG.md`](CHANGELOG.md) — Version history and release notes.

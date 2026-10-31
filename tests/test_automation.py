@@ -25,6 +25,36 @@ from racon.coordinator.server import create_worker_api
 from racon.coordinator.tasks import TaskManager
 
 
+def test_worker_re_enrolls_when_session_expires(monkeypatch):
+    """HTTP 401 from /tasks/claim must refresh the session instead of failing forever."""
+    agent = RaconAgent(coordinator_url="http://127.0.0.1:8765")
+    agent._session_token = "expired"
+    agent._join_code = "join-code"
+    enrollments = []
+    monkeypatch.setattr(agent, "enroll", lambda code: enrollments.append(code) or True)
+
+    class _Response:
+        status_code = 401
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def post(self, *args, **kwargs):
+            return _Response()
+
+    monkeypatch.setattr("racon.agent.worker.httpx.Client", _Client)
+
+    assert agent.check_and_execute_task() is False
+    assert enrollments == ["join-code"]
+
+
 def test_invites_persist_across_restart(tmp_path):
     store = tmp_path / "invites.json"
     first = InviteManager(store_path=store)

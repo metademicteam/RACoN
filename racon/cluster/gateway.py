@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from racon.cluster.auth import ApiKeyStore
 from racon.cluster.config import ClusterConfig
 from racon.cluster.ratelimit import SlidingWindowLimiter
+from racon.config import VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ def create_gateway(
 
     app = FastAPI(
         title="RACoN Cluster Gateway",
-        version="1.0.1",
+        version=VERSION,
         docs_url=None,
         redoc_url=None,
         openapi_url=None,

@@ -64,6 +64,33 @@ class HardwareSnapshot:
         return data
 
 
+def _no_window_flags() -> int:
+    return 0x08000000 if platform.system() == "Windows" else 0
+
+
+def _linux_cpu_name() -> Optional[str]:
+    try:
+        with open("/proc/cpuinfo", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.lower().startswith("model name"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        return None
+    return None
+
+
+def _linux_gpu_name() -> Optional[str]:
+    try:
+        result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if any(k in line.lower() for k in ("vga compatible controller", "3d controller", "display controller")):
+                    return line.split(":", 2)[-1].strip()
+    except Exception:
+        pass
+    return None
+
+
 def get_cpu_name() -> str:
     """Attempt to get the CPU brand string."""
     try:
@@ -78,6 +105,10 @@ def get_cpu_name() -> str:
             return name.strip()
     except Exception:
         pass
+    if platform.system() == "Linux":
+        name = _linux_cpu_name()
+        if name:
+            return name
     return platform.processor() or "Unknown"
 
 
@@ -90,7 +121,7 @@ def detect_gpu() -> GpuInfo:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.total,memory.used,utilization.gpu",
              "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5, creationflags=0x08000000  # CREATE_NO_WINDOW
+            capture_output=True, text=True, timeout=5, creationflags=_no_window_flags()
         )
         if result.returncode == 0 and result.stdout.strip():
             parts = result.stdout.strip().split(", ")
@@ -106,13 +137,29 @@ def detect_gpu() -> GpuInfo:
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
         logger.debug("nvidia-smi not available: %s", e)
 
+    # Linux: identify the GPU through lspci; do not invent VRAM or utilization values
+    if platform.system() == "Linux":
+        name = _linux_gpu_name()
+        if name:
+            gpu.name = name
+            gpu.detection_method = "lspci"
+            lowered = name.lower()
+            if "nvidia" in lowered:
+                gpu.vendor = "NVIDIA"
+            elif "amd" in lowered or "radeon" in lowered or "ati" in lowered:
+                gpu.vendor = "AMD"
+            elif "intel" in lowered:
+                gpu.vendor = "Intel"
+            gpu.supported = False
+            return gpu
+
     # Try Windows WMI for GPU name at minimum
     if platform.system() == "Windows":
         try:
             result = subprocess.run(
                 ["powershell", "-Command",
                  "Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name"],
-                capture_output=True, text=True, timeout=5, creationflags=0x08000000
+                capture_output=True, text=True, timeout=5, creationflags=_no_window_flags()
             )
             if result.returncode == 0 and result.stdout.strip():
                 gpu.name = result.stdout.strip()

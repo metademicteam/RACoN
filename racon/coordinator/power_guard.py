@@ -7,8 +7,9 @@ from __future__ import annotations
 import ctypes
 import logging
 import platform
+import shutil
 import subprocess
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +22,21 @@ ES_AWAYMODE_REQUIRED = 0x00000040
 class CoordinatorPowerGuard:
     def __init__(self) -> None:
         self._is_preventing_sleep = False
+        self._inhibit_process: Optional[subprocess.Popen] = None
 
     def check_power_plan(self) -> Dict[str, Any]:
-        """Query Windows power configuration to check AC standby timeout."""
+        """Query the host power configuration to check whether sleep can interrupt the coordinator."""
+        if platform.system() == "Linux":
+            has_inhibit = shutil.which("systemd-inhibit") is not None
+            return {
+                "status": "ok" if has_inhibit else "unsupported",
+                "is_ac_sleep_disabled": has_inhibit,
+                "message": (
+                    "Coordinator host sleep is inhibited with systemd-inhibit while RACoN runs."
+                    if has_inhibit
+                    else "systemd-inhibit not found. Disable suspend on the coordinator host."
+                ),
+            }
         if platform.system() != "Windows":
             return {"status": "unsupported", "is_ac_sleep_disabled": True, "message": "Non-Windows OS"}
 
@@ -64,7 +77,29 @@ class CoordinatorPowerGuard:
             return {"status": "error", "is_ac_sleep_disabled": False, "message": str(e)}
 
     def prevent_sleep(self) -> bool:
-        """Inform Windows OS that this background service requires the system to stay awake."""
+        """Keep the host awake while the coordinator is serving."""
+        if platform.system() == "Linux":
+            if not shutil.which("systemd-inhibit"):
+                return False
+            try:
+                self._inhibit_process = subprocess.Popen(
+                    [
+                        "systemd-inhibit",
+                        "--what=idle:sleep",
+                        "--why=RACoN coordinator is serving the cluster",
+                        "--mode=block",
+                        "sleep", "infinity",
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                self._is_preventing_sleep = True
+                logger.info("PowerGuard: systemd-inhibit active while the coordinator runs")
+                return True
+            except Exception as e:
+                logger.warning("PowerGuard failed to start systemd-inhibit: %s", e)
+                return False
         if platform.system() != "Windows":
             return False
 
@@ -82,7 +117,16 @@ class CoordinatorPowerGuard:
             return False
 
     def allow_sleep(self) -> None:
-        """Restore default Windows power management behavior."""
+        """Restore default power management behavior."""
+        if self._inhibit_process is not None:
+            try:
+                self._inhibit_process.terminate()
+                self._inhibit_process.wait(timeout=3)
+            except Exception:
+                pass
+            self._inhibit_process = None
+            self._is_preventing_sleep = False
+            logger.info("PowerGuard: systemd-inhibit released")
         if platform.system() == "Windows" and self._is_preventing_sleep:
             try:
                 ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)

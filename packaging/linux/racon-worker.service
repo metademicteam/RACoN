@@ -1,0 +1,14 @@
+[Unit]
+Description=RACoN distributed compute worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=@EXEC@ --headless
+Restart=on-failure
+RestartSec=10
+Environment=RACON_AUTO_CONNECT=1
+
+[Install]
+WantedBy=default.target

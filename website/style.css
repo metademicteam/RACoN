@@ -135,14 +135,48 @@ h3 { font-size: 1.1rem; margin: 0 0 0.4rem; }
 .steps { padding-left: 1.2rem; }
 .steps li { margin-bottom: 0.6rem; }
 
+.downloads {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 1rem;
+  align-items: stretch;
+}
+
 .download {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 1.5rem;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.55rem;
+  position: relative;
 }
-.download p { margin: 0.3rem 0 0; }
+.download p { margin: 0; }
+.download .btn { margin-top: 0.5rem; }
+.download.recommended {
+  border-color: var(--accent-2);
+  box-shadow: inset 0 0 0 1px var(--accent-2);
+}
+
+.platform-tag {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+}
+
+.install-lines {
+  width: 100%;
+  margin: 0.2rem 0;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.install-lines code { white-space: pre; }
+
+#linux-deb-wrap { font-size: 0.85rem; }
 
 .verify { margin-top: 1rem; }
 .verify summary { cursor: pointer; color: var(--accent); }

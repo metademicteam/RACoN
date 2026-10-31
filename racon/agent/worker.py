@@ -6,6 +6,7 @@ Verifies coordinator-signed task envelopes and returns signed results.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -89,6 +90,7 @@ class RaconAgent:
         self._worker_thread: Optional[threading.Thread] = None
         self.rpc_server: Optional[Any] = None
         self.rpc_endpoint: Optional[str] = None
+        self.rpc_last_error: Optional[str] = None
         self.assigned_shard: Optional[Any] = None
         self.assigned_shard_path: Optional[str] = None
         self._join_code: Optional[str] = None
@@ -113,7 +115,7 @@ class RaconAgent:
             gpu_name=hw.gpu.name,
             gpu_vram_mb=hw.gpu.vram_total_mb,
             runtimes=["ollama", "local"],
-            os_name=f"{hw.os_name} {hw.os_version}".strip(),
+            os_name=f"{hw.os_name} {hw.os_version}".strip()[:128],
             is_simulated=False,
             rpc_endpoint=(
                 self.rpc_endpoint
@@ -163,7 +165,21 @@ class RaconAgent:
                     logger.info("Enrollment succeeded: state=%s", enroll_resp.trust_state.value)
                     return True
                 else:
-                    self.status.last_error = f"Enrollment HTTP error: {resp.status_code} {resp.text}"
+                    try:
+                        body = resp.json()
+                        detail = body.get("detail") or body.get("message") or ""
+                    except Exception:
+                        detail = resp.text.strip()
+                    detail = detail or resp.reason_phrase
+                    if resp.status_code >= 500:
+                        self.status.last_error = (
+                            f"Coordinator unavailable (HTTP {resp.status_code} {detail}). "
+                            "The RACoN head node may be offline; retrying automatically."
+                        )
+                    else:
+                        self.status.last_error = (
+                            f"Enrollment HTTP error: {resp.status_code} {detail}"
+                        )
                     logger.error(self.status.last_error)
                     return False
         except Exception as e:
@@ -192,10 +208,14 @@ class RaconAgent:
         if exe:
             try:
                 out = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True, timeout=5)
+                cgnat = ipaddress.ip_network("100.64.0.0/10")
                 for line in out.stdout.splitlines():
                     ip = line.strip()
-                    if ip.startswith("100."):
-                        return ip
+                    try:
+                        if ipaddress.ip_address(ip) in cgnat:
+                            return ip
+                    except ValueError:
+                        continue
             except Exception:
                 pass
         try:
@@ -216,7 +236,7 @@ class RaconAgent:
     ) -> tuple[bool, str]:
         """Enroll and start the RPC worker with no operator input.
 
-        Used on app launch and at Windows logon. The coordinator URL and join code default to the
+        Used on app launch and at desktop login. The coordinator URL and join code default to the
         values baked into the installer and can be overridden by environment variables.
         """
         if coordinator_url:
@@ -238,7 +258,11 @@ class RaconAgent:
         if self.start_rpc_worker(host=bind, port=netdefaults.rpc_port()):
             message += f" RPC listening on {self.rpc_endpoint}."
         else:
-            message += " RPC server did not start; this node will only run coordinator tasks."
+            reason = (self.rpc_last_error or "unknown reason").splitlines()[0]
+            message += (
+                f" RPC server did not start: {reason} "
+                "The node can still run coordinator tasks."
+            )
         return True, message
 
     def send_heartbeat(self) -> bool:
@@ -299,6 +323,13 @@ class RaconAgent:
                     f"{self.coordinator_url}/tasks/claim",
                     json={"node_id": self.node_id, "session_token": self._session_token},
                 )
+                if claim_resp.status_code == 401:
+                    # Session tokens expire after 15 minutes. Re-enroll to refresh instead of
+                    # silently returning 401 forever while the worker still shows as running.
+                    logger.warning("Task claim rejected (session expired); re-enrolling.")
+                    if self._join_code:
+                        self.enroll(self._join_code)
+                    return False
                 if claim_resp.status_code != 200:
                     return False
                 data = claim_resp.json()
@@ -473,14 +504,8 @@ class RaconAgent:
         self._worker_thread = threading.Thread(target=_loop, daemon=True, name="RACoNAgentWorker")
         self._worker_thread.start()
 
-    def prepare_and_start_rpc_worker(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 50052,
-        threads: int = 4,
-        progress_callback: Optional[Any] = None,
-    ) -> tuple[bool, str]:
-        """Discover, download, and verify the optimal layer shard, then start rpc-server."""
+    def prepare_worker_shard(self, progress_callback: Optional[Any] = None) -> tuple[bool, str]:
+        """Download and verify this worker's layer shard without interrupting RPC."""
         from racon.runtime.distributed_gguf import ensure_worker_shard
         from racon.hardware import discover_hardware
 
@@ -488,7 +513,6 @@ class RaconAgent:
             hw = discover_hardware()
             avail_ram = hw.ram_available_mb
             logger.info("Preparing worker layer shard with available RAM: %.1f MB", avail_ram)
-
             shard, shard_path = ensure_worker_shard(
                 available_ram_mb=avail_ram,
                 is_master=False,
@@ -496,31 +520,56 @@ class RaconAgent:
             )
             self.assigned_shard = shard
             self.assigned_shard_path = shard_path
+            msg = (
+                f"Model layer shard ready: {shard.filename} "
+                f"(layers {shard.layer_start}-{shard.layer_end})."
+            )
+            logger.info(msg)
+            return True, msg
+        except Exception as exc:
+            msg = f"Model layer shard download failed: {exc}"
+            logger.error(msg)
+            return False, msg
 
-            ok = self.start_rpc_worker(host=host, port=port, threads=threads)
-            if ok:
-                msg = f"Shard {shard.shard_index}/{shard.total_shards} ({shard.filename}) verified. RPC listening on {self.rpc_endpoint}."
-                logger.info(msg)
-                return True, msg
-            else:
-                from racon.runtime.distributed_gguf import find_llama_tool
-                if not find_llama_tool("rpc-server"):
-                    return False, "rpc-server.exe not found. Reinstall RACoN, or install llama.cpp (winget install ggml.llamacpp)."
-                return False, "rpc-server.exe was found but did not start. Check that the port is free and not reserved by Windows."
-        except Exception as e:
-            err = f"Failed to prepare worker layer shard: {e}"
-            logger.error(err)
-            return False, err
+    def prepare_and_start_rpc_worker(
+        self,
+        host: Optional[str] = None,
+        port: int = 50052,
+        threads: int = 4,
+        progress_callback: Optional[Any] = None,
+    ) -> tuple[bool, str]:
+        """Discover, download, and verify the optimal layer shard, then start rpc-server."""
+        if not host or host in ("0.0.0.0", "::"):
+            host = self.detect_bind_ip()
+        self._rpc_bind = host
+
+        ok, shard_msg = self.prepare_worker_shard(progress_callback=progress_callback)
+        if not ok:
+            return False, shard_msg
+
+        if self.start_rpc_worker(host=host, port=port, threads=threads):
+            msg = f"{shard_msg} RPC listening on {self.rpc_endpoint}."
+            logger.info(msg)
+            return True, msg
+        return False, (
+            f"RPC server did not start: {self.rpc_last_error or 'unknown reason'}. "
+            f"Log: {getattr(self.rpc_server, 'log_path', None) or 'unavailable'}."
+        )
 
     def start_rpc_worker(self, host: str = "127.0.0.1", port: int = 50052, threads: int = 4) -> bool:
         """Start the native llama.cpp RPC server for remote layer execution."""
         from racon.runtime.rpc_worker import RpcServerProcess
         if self.rpc_server and self.rpc_server.is_running():
+            self.rpc_last_error = None
             return True
         self.rpc_server = RpcServerProcess(host=host, port=port, threads=threads)
         ok = self.rpc_server.start()
         if ok:
             self.rpc_endpoint = f"{host}:{port}"
+            self.rpc_last_error = None
+        else:
+            self.rpc_endpoint = None
+            self.rpc_last_error = self.rpc_server.last_error or "rpc-server did not start."
         return ok
 
     def stop_rpc_worker(self) -> None:
@@ -562,6 +611,8 @@ class RaconAgent:
             "last_heartbeat_time": self.status.last_heartbeat_time,
             "last_error": self.status.last_error,
             "rpc_endpoint": self.rpc_endpoint,
+            "rpc_error": self.rpc_last_error,
+            "rpc_log_path": getattr(self.rpc_server, "log_path", None),
             "assigned_shard": shard_desc,
             "assigned_shard_path": self.assigned_shard_path,
         }

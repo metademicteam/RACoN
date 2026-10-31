@@ -142,6 +142,25 @@ def test_rpc_server_process_lifecycle():
     assert rpc.is_running() is False
 
 
+def test_describe_rpc_exit_sigill():
+    """SIGILL should explain that the CPU lacks an instruction used by the build."""
+    from racon.runtime.rpc_worker import describe_rpc_exit
+
+    message = describe_rpc_exit(-4)
+    assert "SIGILL" in message
+    assert "CPU" in message
+    assert "exited with code 1" in describe_rpc_exit(1)
+
+
+def test_rpc_server_reports_missing_binary(monkeypatch):
+    """A missing rpc-server must surface an actionable error instead of a silent False."""
+    monkeypatch.setattr("racon.runtime.rpc_worker.find_llama_tool", lambda name: None)
+    rpc = RpcServerProcess(host="127.0.0.1", port=50057, threads=1, enable_cache=False)
+    assert rpc.start() is False
+    assert rpc.last_error is not None
+    assert "not found" in rpc.last_error.lower()
+
+
 def test_agent_rpc_worker_integration(tmp_path):
     """Verify RaconAgent manages RPC worker state cleanly."""
     agent = RaconAgent(coordinator_url="http://127.0.0.1:8765")
@@ -157,6 +176,42 @@ def test_agent_rpc_worker_integration(tmp_path):
     assert agent.rpc_endpoint is None
     status = agent.get_status()
     assert status["rpc_endpoint"] is None
+
+
+def test_prepare_worker_shard_sets_assignment(monkeypatch):
+    shard = ShardInfo(
+        shard_index=2,
+        total_shards=2,
+        filename="shard-2.gguf",
+        file_path="",
+        file_size_bytes=10,
+        sha256="0" * 64,
+        tensor_count=1,
+        layer_start=13,
+        layer_end=25,
+        min_ram_mb=100.0,
+    )
+    monkeypatch.setattr(
+        "racon.runtime.distributed_gguf.ensure_worker_shard",
+        lambda **kwargs: (shard, "C:/tmp/shard-2.gguf"),
+    )
+    agent = RaconAgent(node_id_override="test-shard-prep")
+    ok, msg = agent.prepare_worker_shard()
+    assert ok is True
+    assert agent.assigned_shard is shard
+    assert agent.assigned_shard_path == "C:/tmp/shard-2.gguf"
+    assert "layers 13-25" in msg
+
+
+def test_prepare_worker_shard_reports_failure(monkeypatch):
+    def boom(**kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr("racon.runtime.distributed_gguf.ensure_worker_shard", boom)
+    agent = RaconAgent(node_id_override="test-shard-fail")
+    ok, msg = agent.prepare_worker_shard()
+    assert ok is False
+    assert "network down" in msg
 
 
 def test_agent_shard_verification_task():

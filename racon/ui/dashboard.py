@@ -7,10 +7,11 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QGroupBox, QProgressBar, QFrame,
+    QLabel, QGroupBox, QProgressBar, QFrame, QScrollArea,
 )
 
 from racon.hardware import HardwareSnapshot
+from racon.ui.styles import TEXT_SECONDARY
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +32,12 @@ class MetricCard(QFrame):
         self._value_label = QLabel(value)
         self._value_label.setObjectName("metric-value")
         self._value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._value_label.setWordWrap(True)
 
         self._label = QLabel(label)
         self._label.setObjectName("metric-label")
         self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._label.setWordWrap(True)
 
         layout.addWidget(self._value_label)
         layout.addWidget(self._label)
@@ -52,9 +55,18 @@ class DashboardPanel(QWidget):
         self._last_result = None
 
     def _setup_ui(self):
-        layout = QVBoxLayout(self)
+        # Scroll instead of squeezing groups: long GPU/OS text stays readable on small windows.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setSpacing(16)
         layout.setContentsMargins(16, 16, 16, 16)
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
 
         # Title
         title = QLabel("⚡ RACoN Dashboard")
@@ -92,12 +104,14 @@ class DashboardPanel(QWidget):
         cpu_group = QGroupBox("CPU")
         cpu_layout = QVBoxLayout(cpu_group)
         self._cpu_name_label = QLabel("Detecting...")
+        self._cpu_name_label.setWordWrap(True)
         cpu_layout.addWidget(self._cpu_name_label)
         self._cpu_bar = QProgressBar()
         self._cpu_bar.setRange(0, 100)
         cpu_layout.addWidget(self._cpu_bar)
         self._cpu_detail_label = QLabel("")
         self._cpu_detail_label.setObjectName("metric-label")
+        self._cpu_detail_label.setWordWrap(True)
         cpu_layout.addWidget(self._cpu_detail_label)
         layout.addWidget(cpu_group)
 
@@ -109,6 +123,7 @@ class DashboardPanel(QWidget):
         ram_layout.addWidget(self._ram_bar)
         self._ram_detail_label = QLabel("")
         self._ram_detail_label.setObjectName("metric-label")
+        self._ram_detail_label.setWordWrap(True)
         ram_layout.addWidget(self._ram_detail_label)
         layout.addWidget(ram_group)
 
@@ -122,11 +137,16 @@ class DashboardPanel(QWidget):
         ]
         self._hw_values: list[QLabel] = []
         for i, lbl in enumerate(labels):
-            hw_layout.addWidget(QLabel(lbl), i, 0)
+            name = QLabel(lbl)
+            name.setStyleSheet(f"color: {TEXT_SECONDARY};")
+            name.setAlignment(Qt.AlignmentFlag.AlignTop)
+            hw_layout.addWidget(name, i, 0)
             val = QLabel("—")
+            val.setWordWrap(True)
             val.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self._hw_values.append(val)
             hw_layout.addWidget(val, i, 1)
+        hw_layout.setColumnStretch(1, 1)
         layout.addWidget(hw_group)
 
         # Last decision summary
