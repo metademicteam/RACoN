@@ -1,209 +1,55 @@
-"""OpenAI-Compatible Chat Completions & Models API (Windows and Linux clusters).
+"""Local GGUF resolution helpers.
 
-Allows any standard OpenAI client (Cursor, LangChain, LlamaIndex, OpenAI Python SDK)
-to query the RACoN cluster directly via http://localhost:8765/v1/chat/completions.
+This module used to expose a second, simulated OpenAI-compatible router. That router has
+been removed: ``/v1/chat/completions`` is now served by ``routes_engine`` which talks to a
+real runtime and returns a structured error when none is available.
+
+Only the model-path helper remains, because the desktop chat panel and the Linux
+packaging tests depend on it.
 """
+
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
-import time
-import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import List, Optional
 
-import httpx
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
-
-from ..config import settings
-from ..storage.db import get_database
+from racon.models.catalog import LOCAL_GEMMA_FILENAME
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/v1", tags=["OpenAI Compatibility"])
 
 # Default model path relative to the repository root; RACON_GGUF_MODEL overrides it on any OS.
-DEFAULT_GGUF_MODEL = str(
-    Path(__file__).resolve().parents[3]
-    / "Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf"
-)
+DEFAULT_GGUF_MODEL = str(Path(__file__).resolve().parents[2] / LOCAL_GEMMA_FILENAME)
 
 
 def resolve_local_gguf() -> Optional[str]:
-    """Find a local GGUF: env var, repo root, then the per-user models folder."""
+    """Find a local GGUF: explicit env var, the managed model store, then the repo root."""
+    env_model = os.environ.get("RACON_GGUF_MODEL")
+    if env_model and Path(env_model).is_file():
+        return env_model
+
     candidates: List[Path] = []
-    if os.environ.get("RACON_GGUF_MODEL"):
-        candidates.append(Path(os.environ["RACON_GGUF_MODEL"]))
-    candidates.append(Path(DEFAULT_GGUF_MODEL))
     try:
         from racon.config import get_data_dir
-        candidates.extend(sorted((get_data_dir() / "models").rglob("*.gguf")))
-    except Exception:
+
+        candidates.append(get_data_dir() / "models")
+    except Exception:  # pragma: no cover - path lookup must never break import
         pass
-    for path in candidates:
-        if path.is_file():
-            return str(path)
-    return None
+    candidates.append(Path(DEFAULT_GGUF_MODEL).parent)
 
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-
-class ChatCompletionRequest(BaseModel):
-    model: str = "gemma-3-1b"
-    messages: List[ChatMessage]
-    temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 256
-    stream: Optional[bool] = False
-
-
-@router.get("/models")
-async def list_models() -> Dict[str, Any]:
-    """OpenAI-compatible /v1/models endpoint."""
-    models = [
-        {
-            "id": "gemma-3-1b",
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "racon",
-            "permission": [],
-            "root": "gemma-3-1b",
-            "parent": None,
-        },
-        {
-            "id": "llama3.2:1b",
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "racon",
-            "permission": [],
-            "root": "llama3.2:1b",
-            "parent": None,
-        },
-        {
-            "id": "qwen2.5:1.5b",
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": "racon",
-            "permission": [],
-            "root": "qwen2.5:1.5b",
-            "parent": None,
-        },
-    ]
-    return {"object": "list", "data": models}
-
-
-@router.post("/chat/completions")
-async def chat_completions(req: ChatCompletionRequest) -> Any:
-    """OpenAI-compatible /v1/chat/completions endpoint for RACoN."""
-    # Build consolidated prompt
-    prompt_parts = []
-    for m in req.messages:
-        prompt_parts.append(f"{m.role.capitalize()}: {m.content}")
-    prompt = "\n".join(prompt_parts) + "\nAssistant: "
-
-    req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    created_ts = int(time.time())
-
-    # 1. Check if model runs via live Ollama
-    ollama_success = False
-    generated_text = ""
-    prompt_tokens = len(prompt.split())
-    completion_tokens = 0
+    for root in candidates:
+        if not root.is_dir():
+            continue
+        matches = sorted(root.glob("*.gguf"))
+        if matches:
+            return str(matches[0])
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{settings.OLLAMA_HOST}/api/generate",
-                json={
-                    "model": req.model,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"num_predict": req.max_tokens or 256, "temperature": req.temperature or 0.7},
-                },
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                generated_text = data.get("response", "")
-                completion_tokens = data.get("eval_count", len(generated_text.split()))
-                ollama_success = True
-    except Exception:
+        from racon.config import get_data_dir
+
+        for path in sorted((get_data_dir() / "models").rglob("*.gguf")):
+            return str(path)
+    except Exception:  # pragma: no cover
         pass
-
-    # 2. If not Ollama, check if local GGUF (e.g. Gemma-3-1B)
-    if not ollama_success:
-        local_model = resolve_local_gguf()
-        if local_model and ("gemma" in req.model.lower() or "local" in req.model.lower()):
-            from racon.runtime.rpc_worker import DistributedPipelineEngine
-            engine = DistributedPipelineEngine()
-            # Run single turn on local device
-            res = engine.execute(
-                model_path=local_model,
-                rpc_endpoints=[],  # Runs on local Vulkan/CPU device if no remote RPC
-                prompt=prompt,
-                max_tokens=req.max_tokens or 64,
-                n_gpu_layers=26,
-            )
-            if res.exit_code == 0 and res.response:
-                generated_text = res.response
-                completion_tokens = int(res.generation_tokens_per_second * res.total_duration_seconds) or len(generated_text.split())
-                ollama_success = True
-
-    # 3. Deterministic fallback if neither runtime responded
-    if not ollama_success:
-        generated_text = (
-            f"[RACoN Cluster] Received prompt with {len(req.messages)} messages. "
-            f"Active model target: '{req.model}'. Cluster is online and ready for tasks."
-        )
-        completion_tokens = len(generated_text.split())
-
-    # Streaming response
-    if req.stream:
-        async def stream_generator() -> AsyncGenerator[str, None]:
-            words = generated_text.split(" ")
-            for w in words:
-                chunk = {
-                    "id": req_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_ts,
-                    "model": req.model,
-                    "choices": [{"index": 0, "delta": {"content": w + " "}, "finish_reason": None}],
-                }
-                yield f"data: {json.dumps(chunk)}\n\n"
-                await asyncio.sleep(0.02)
-
-            done_chunk = {
-                "id": req_id,
-                "object": "chat.completion.chunk",
-                "created": created_ts,
-                "model": req.model,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-            }
-            yield f"data: {json.dumps(done_chunk)}\n\n"
-            yield "data: [DONE]\n\n"
-
-        return StreamingResponse(stream_generator(), media_type="text/event-stream")
-
-    # Non-streaming response
-    return {
-        "id": req_id,
-        "object": "chat.completion",
-        "created": created_ts,
-        "model": req.model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": generated_text},
-                "finish_reason": "stop",
-            }
-        ],
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": prompt_tokens + completion_tokens,
-        },
-    }
+    return None

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from racon.config import get_db_path
+from racon.storage.migrations import apply_migrations
 
 logger = logging.getLogger(__name__)
 
@@ -106,14 +107,14 @@ class Database:
         return conn
 
     def initialize(self):
-        """Create tables if they don't exist."""
+        """Create tables if they don't exist, then apply pending migrations."""
         if self._initialized:
             return
         with self._write_lock:
             conn = self.connect()
             try:
                 conn.executescript(CREATE_TABLES_SQL)
-                # Check schema version
+                # Legacy databases recorded their version in schema_info; seed it once.
                 cursor = conn.execute("SELECT MAX(version) FROM schema_info")
                 row = cursor.fetchone()
                 if row[0] is None:
@@ -122,8 +123,9 @@ class Database:
                         (SCHEMA_VERSION,)
                     )
                     conn.commit()
+                version = apply_migrations(conn)
                 self._initialized = True
-                logger.info("Database initialized (schema v%d)", SCHEMA_VERSION)
+                logger.info("Database initialized (schema v%d)", version)
             except sqlite3.Error as e:
                 logger.error("Database initialization failed: %s", e)
                 raise

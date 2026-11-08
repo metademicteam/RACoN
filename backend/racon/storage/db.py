@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import functools
+import json
 import logging
+import os
 from collections.abc import Generator
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Optional
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.racon.core.config import get_db_path
@@ -78,35 +80,104 @@ def _dual_session(func):
     return wrapper
 
 
-def init_db(db_path: Optional[Path] = None) -> Engine:
-    """Initialize SQLite database engine, enable WAL & foreign keys, and create tables."""
-    global _engine, _SessionFactory
+def _normalise_database_url(url: str) -> str:
+    """Accept the URL forms Docker/managed Postgres providers hand out."""
+    value = url.strip()
+    if value.startswith("postgres://"):
+        return "postgresql+psycopg2://" + value[len("postgres://"):]
+    if value.startswith("postgresql://"):
+        return "postgresql+psycopg2://" + value[len("postgresql://"):]
+    return value
+
+
+def resolve_database_url(db_path: Optional[Path] = None) -> tuple[str, dict[str, Any]]:
+    """Return ``(url, engine_kwargs)`` for the configured database.
+
+    ``DATABASE_URL`` (or ``RACON_DATABASE_URL``) selects PostgreSQL; otherwise RACoN uses
+    the local SQLite file exactly as before. Tests set ``RACON_DB_PATH`` and therefore keep
+    using SQLite.
+    """
+    explicit = os.environ.get("DATABASE_URL") or os.environ.get("RACON_DATABASE_URL")
+    if explicit and explicit.strip():
+        return _normalise_database_url(explicit), {
+            "pool_pre_ping": True,
+            "pool_recycle": 1800,
+            "pool_size": int(os.environ.get("RACON_DB_POOL_SIZE", "5")),
+            "max_overflow": int(os.environ.get("RACON_DB_MAX_OVERFLOW", "10")),
+        }
 
     resolved_path = db_path or get_db_path()
+    resolved_path = Path(resolved_path)
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{resolved_path}", {"connect_args": {"check_same_thread": False}}
 
-    db_url = f"sqlite:///{resolved_path}"
-    logger.info("Initializing SQLite database at: %s", resolved_path)
 
-    engine = create_engine(
-        db_url,
-        connect_args={"check_same_thread": False},
-        future=True,
-    )
+_CAPABILITY_COLUMNS = {
+    "os_name": "VARCHAR(128)",
+    "rpc_endpoint": "VARCHAR(128)",
+    "models_json": "TEXT",
+    "features_json": "TEXT",
+}
 
-    # SQLite Pragmas: WAL journal mode and foreign key enforcement
-    @event.listens_for(engine, "connect")
-    def _set_sqlite_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
-        cursor = dbapi_connection.cursor()
-        try:
-            cursor.execute("PRAGMA journal_mode=WAL;")
-            cursor.execute("PRAGMA foreign_keys=ON;")
-            cursor.execute("PRAGMA busy_timeout=5000;")
-        finally:
-            cursor.close()
 
-    # Create all tables defined in models.py
+def _ensure_capability_columns(engine: Engine) -> None:
+    """Add node_capabilities columns introduced after a deployment was created."""
+    inspector = inspect(engine)
+    if "node_capabilities" not in inspector.get_table_names():
+        return
+    existing = {column["name"] for column in inspector.get_columns("node_capabilities")}
+    missing = {name: ddl for name, ddl in _CAPABILITY_COLUMNS.items() if name not in existing}
+    if not missing:
+        return
+    with engine.begin() as connection:
+        for name, ddl in missing.items():
+            connection.execute(text(f"ALTER TABLE node_capabilities ADD COLUMN {name} {ddl}"))
+            logger.info("Added node_capabilities.%s", name)
+
+
+def _json_list(raw: Optional[str]) -> list[Any]:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def init_db(db_path: Optional[Path] = None) -> Engine:
+    """Initialize the database engine and create every table.
+
+    PostgreSQL is used when ``DATABASE_URL`` is set; otherwise SQLite with WAL and foreign
+    keys. Table DDL is ``create_all`` (no migrations required for the new routing table).
+    """
+    global _engine, _SessionFactory
+
+    db_url, engine_kwargs = resolve_database_url(db_path)
+    is_sqlite = db_url.startswith("sqlite")
+
+    if is_sqlite:
+        target = db_url.split("///", 1)[-1]
+        logger.info("Initializing SQLite database at: %s", target)
+    else:
+        logger.info("Initializing PostgreSQL database (%s)", db_url.split("@")[-1])
+
+    engine = create_engine(db_url, future=True, **engine_kwargs)
+
+    if is_sqlite:
+        # SQLite Pragmas: WAL journal mode and foreign key enforcement
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection: Any, connection_record: Any) -> None:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL;")
+                cursor.execute("PRAGMA foreign_keys=ON;")
+                cursor.execute("PRAGMA busy_timeout=5000;")
+            finally:
+                cursor.close()
+
+    # Create all tables defined in models.py, then add columns introduced later.
+    # ``create_all`` never alters an existing table.
     Base.metadata.create_all(bind=engine)
+    _ensure_capability_columns(engine)
 
     _engine = engine
     _SessionFactory = sessionmaker(
@@ -116,8 +187,21 @@ def init_db(db_path: Optional[Path] = None) -> Engine:
         expire_on_commit=False,
     )
 
-    logger.info("Database initialized successfully with WAL journal mode and foreign keys enabled.")
+    logger.info("Database initialized successfully (%s).", "SQLite WAL" if is_sqlite else "PostgreSQL")
     return engine
+
+
+def database_info() -> dict[str, Any]:
+    """Safe description of the active database. Never includes credentials."""
+    if _engine is None:
+        return {"backend": "uninitialized", "database": "", "host": "", "driver": ""}
+    url = _engine.url
+    return {
+        "backend": url.get_backend_name(),
+        "database": url.database or "",
+        "host": url.host or "",
+        "driver": url.drivername,
+    }
 
 
 def get_engine() -> Engine:
@@ -175,7 +259,7 @@ get_db = get_session
 
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from backend.racon.storage.models import (
     Node,
     NodeCapability,
@@ -184,7 +268,19 @@ from backend.racon.storage.models import (
     SchedulerDecision,
     Setting,
     AuditEvent,
+    Job,
+    JobTask,
+    JobEvent,
+    RoutingEvent,
 )
+
+TERMINAL_JOB_STATES = ("completed", "partial", "failed", "cancelled")
+TERMINAL_TASK_STATES = ("completed", "failed", "cancelled")
+
+
+def utc_now() -> datetime:
+    """Naive UTC timestamp, matching SQLite's CURRENT_TIMESTAMP used for created_at."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class Database:
@@ -207,69 +303,157 @@ class Database:
                     name=node.get("name", node["id"]),
                     is_local=node.get("is_local", False),
                     status=node.get("status", "available"),
+                    host=node.get("host", "127.0.0.1"),
+                    port=int(node.get("port", 8765) or 8765),
                 )
                 session.add(existing)
+                session.flush()
             else:
                 existing.name = node.get("name", existing.name)
                 existing.is_local = node.get("is_local", existing.is_local)
                 existing.status = node.get("status", existing.status)
-                existing.last_heartbeat = datetime.now()
+                if node.get("host"):
+                    existing.host = node["host"]
+                existing.last_heartbeat = utc_now()
 
-            # Capability
-            caps = node.get("capabilities", {})
+            caps = node.get("capabilities") or {}
+            gpu = caps.get("gpu") if isinstance(caps.get("gpu"), dict) else {}
+            cpu_name = caps.get("cpu_name") or node.get("cpu_name")
+            cpu_cores = (
+                caps.get("cpu_logical_count")
+                or caps.get("cpu_cores")
+                or node.get("cpu_cores")
+            )
+            gpu_name = caps.get("gpu_name") or gpu.get("name") or node.get("gpu_name")
+            gpu_vram = (
+                caps.get("gpu_vram_mb")
+                if caps.get("gpu_vram_mb") is not None
+                else gpu.get("vram_total_mb", node.get("gpu_vram_mb"))
+            )
+            runtimes = caps.get("runtimes") or node.get("runtimes")
+            os_name = caps.get("os") or caps.get("os_name") or node.get("os")
+            rpc_endpoint = caps.get("rpc_endpoint") or node.get("rpc_endpoint")
+            models = caps.get("models") or node.get("models")
+            features = caps.get("features") or node.get("features")
+            ram_total = node.get("ram_total_mb", caps.get("ram_total_mb"))
+            ram_available = node.get("ram_available_mb", caps.get("ram_available_mb"))
+
             if not existing.capabilities:
                 existing.capabilities = NodeCapability(
                     node_id=node["id"],
-                    cpu_name=caps.get("cpu_name", "CPU"),
-                    cpu_cores=caps.get("cpu_logical_count", 4),
-                    ram_total_mb=float(node.get("ram_total_mb", 16384.0)),
-                    ram_available_mb=float(node.get("ram_available_mb", 8192.0)),
-                    gpu_name=caps.get("gpu", {}).get("name") if isinstance(caps.get("gpu"), dict) else None,
-                    runtimes_json=json.dumps(caps.get("runtimes", ["cpu"])),
+                    cpu_name=cpu_name or "CPU",
+                    cpu_cores=int(cpu_cores or 4),
+                    ram_total_mb=float(ram_total or 16384.0),
+                    ram_available_mb=float(ram_available or 8192.0),
+                    gpu_name=gpu_name,
+                    gpu_vram_mb=float(gpu_vram) if gpu_vram is not None else None,
+                    runtimes_json=json.dumps(list(runtimes or ["cpu"])),
+                    os_name=os_name,
+                    rpc_endpoint=rpc_endpoint,
+                    models_json=json.dumps(list(models or [])),
+                    features_json=json.dumps(list(features or [])),
                 )
             else:
-                if "ram_total_mb" in node:
-                    existing.capabilities.ram_total_mb = float(node["ram_total_mb"])
-                if "ram_available_mb" in node:
-                    existing.capabilities.ram_available_mb = float(node["ram_available_mb"])
+                capability = existing.capabilities
+                if cpu_name:
+                    capability.cpu_name = str(cpu_name)[:128]
+                if cpu_cores:
+                    capability.cpu_cores = int(cpu_cores)
+                if ram_total is not None:
+                    capability.ram_total_mb = float(ram_total)
+                if ram_available is not None:
+                    capability.ram_available_mb = float(ram_available)
+                if gpu_name is not None:
+                    capability.gpu_name = str(gpu_name)[:128]
+                if gpu_vram is not None:
+                    capability.gpu_vram_mb = float(gpu_vram)
+                if runtimes:
+                    capability.runtimes_json = json.dumps(list(runtimes))
+                if os_name:
+                    capability.os_name = str(os_name)[:128]
+                if rpc_endpoint:
+                    capability.rpc_endpoint = str(rpc_endpoint)[:128]
+                if models is not None:
+                    capability.models_json = json.dumps(list(models))
+                if features is not None:
+                    capability.features_json = json.dumps(list(features))
+
+    @staticmethod
+    def _node_dict(node: Node) -> dict[str, Any]:
+        data = node.to_dict()
+        capability = node.capabilities
+        if capability:
+            data["ram_total_mb"] = capability.ram_total_mb
+            data["ram_available_mb"] = capability.ram_available_mb
+            data["device_type"] = "cuda" if capability.gpu_name else "cpu"
+            data["capabilities"] = {
+                "cpu_name": capability.cpu_name,
+                "cpu_logical_count": capability.cpu_cores,
+                "cpu_cores": capability.cpu_cores,
+                "ram_total_mb": capability.ram_total_mb,
+                "ram_available_mb": capability.ram_available_mb,
+                "gpu_name": capability.gpu_name,
+                "gpu_vram_mb": capability.gpu_vram_mb,
+                "gpu": {
+                    "name": capability.gpu_name,
+                    "vram_total_mb": capability.gpu_vram_mb,
+                },
+                "runtimes": _json_list(capability.runtimes_json),
+                "os": capability.os_name,
+                "rpc_endpoint": capability.rpc_endpoint,
+                "models": _json_list(capability.models_json),
+                "features": _json_list(capability.features_json),
+            }
+        else:
+            data["ram_total_mb"] = 16384.0
+            data["ram_available_mb"] = 8192.0
+            data["device_type"] = "cpu"
+            data["capabilities"] = {}
+        return data
 
     def get_nodes(self) -> list[dict[str, Any]]:
         with session_scope() as session:
-            nodes = session.query(Node).all()
-            res = []
-            for n in nodes:
-                d = n.to_dict()
-                if n.capabilities:
-                    d["ram_total_mb"] = n.capabilities.ram_total_mb
-                    d["ram_available_mb"] = n.capabilities.ram_available_mb
-                    d["device_type"] = "cuda" if n.capabilities.gpu_name else "cpu"
-                else:
-                    d["ram_total_mb"] = 16384.0
-                    d["ram_available_mb"] = 8192.0
-                    d["device_type"] = "cpu"
-                res.append(d)
-            return res
+            return [self._node_dict(node) for node in session.query(Node).all()]
 
     def get_node(self, node_id: str) -> Optional[dict[str, Any]]:
         with session_scope() as session:
             node = session.get(Node, node_id)
-            if not node:
-                return None
-            d = node.to_dict()
-            if node.capabilities:
-                d["ram_total_mb"] = node.capabilities.ram_total_mb
-                d["ram_available_mb"] = node.capabilities.ram_available_mb
-                d["device_type"] = "cuda" if node.capabilities.gpu_name else "cpu"
-            return d
+            return self._node_dict(node) if node else None
 
     def update_node_status(self, node_id: str, status: str) -> bool:
         with session_scope() as session:
             node = session.get(Node, node_id)
             if node:
                 node.status = status
-                node.last_heartbeat = datetime.now()
+                node.last_heartbeat = utc_now()
                 return True
             return False
+
+    def update_node_heartbeat(
+        self,
+        node_id: str,
+        *,
+        ram_available: Optional[float] = None,
+        models: Optional[list[str]] = None,
+    ) -> bool:
+        """Record a local telemetry sample for a node.
+
+        Only values that were actually measured are written. ``models=None`` keeps the
+        stored inventory; an empty list clears it, matching a worker that reports no
+        installed models. Workload is not persisted because the schema has no column for
+        it; the orchestration selector reads live CPU load directly instead of inventing
+        a stored figure.
+        """
+        with session_scope() as session:
+            node = session.get(Node, node_id)
+            if not node:
+                return False
+            node.last_heartbeat = utc_now()
+            if ram_available is not None and node.capabilities:
+                node.capabilities.ram_available_mb = float(ram_available)
+            if models is not None and node.capabilities:
+                node.capabilities.models_json = json.dumps(list(models))
+            return True
 
     # --- Jobs (InferenceTask) ---
 
@@ -459,6 +643,364 @@ class Database:
                     "details": det,
                 })
             return res
+
+    # --- Orchestration jobs ---
+
+    JOB_FIELDS = {
+        "name",
+        "status",
+        "requested_mode",
+        "execution_mode",
+        "planner_mode",
+        "plan_json",
+        "result_text",
+        "error",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "max_tokens",
+        "max_parallel_tasks",
+        "tasks_total",
+        "tasks_completed",
+        "tasks_failed",
+    }
+
+    TASK_FIELDS = {
+        "title",
+        "instruction",
+        "depends_on_json",
+        "state",
+        "worker_id",
+        "attempts",
+        "output",
+        "error",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "max_tokens",
+        "timeout_s",
+        "retries",
+    }
+
+    def create_orchestration_job(self, job: dict[str, Any]) -> None:
+        with session_scope() as session:
+            record = Job(
+                id=job["id"],
+                name=job.get("name", ""),
+                prompt=job["prompt"],
+                model_name=job["model_name"],
+                status=job.get("status", "queued"),
+                requested_mode=job.get("requested_mode", "auto"),
+                execution_mode=job.get("execution_mode"),
+                planner_mode=job.get("planner_mode"),
+                plan_json=job.get("plan_json"),
+                result_text=job.get("result_text"),
+                error=job.get("error"),
+                max_tokens=int(job.get("max_tokens", 512)),
+                max_parallel_tasks=int(job.get("max_parallel_tasks", 3)),
+                tasks_total=int(job.get("tasks_total", 0)),
+                tasks_completed=int(job.get("tasks_completed", 0)),
+                tasks_failed=int(job.get("tasks_failed", 0)),
+            )
+            session.add(record)
+
+    def update_orchestration_job(self, job_id: str, updates: dict[str, Any]) -> bool:
+        cleaned = {key: value for key, value in updates.items() if key in self.JOB_FIELDS}
+        if not cleaned:
+            return False
+        with session_scope() as session:
+            record = session.get(Job, job_id)
+            if not record:
+                return False
+            for key, value in cleaned.items():
+                setattr(record, key, value)
+            return True
+
+    def get_orchestration_job(self, job_id: str, include_tasks: bool = True) -> Optional[dict[str, Any]]:
+        with session_scope() as session:
+            record = session.get(Job, job_id)
+            if not record:
+                return None
+            return self._job_to_dict(record, include_tasks=include_tasks)
+
+    def list_orchestration_jobs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        status: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        with session_scope() as session:
+            query = session.query(Job)
+            if status:
+                query = query.filter(Job.status == status)
+            records = (
+                query.order_by(Job.created_at.desc()).limit(limit).offset(offset).all()
+            )
+            return [self._job_to_dict(record, include_tasks=False) for record in records]
+
+    def upsert_orchestration_task(self, job_id: str, task: dict[str, Any]) -> None:
+        with session_scope() as session:
+            record = session.get(JobTask, (job_id, task["task_id"]))
+            if record is None:
+                record = JobTask(
+                    job_id=job_id,
+                    task_id=task["task_id"],
+                    title=task.get("title", ""),
+                    instruction=task.get("instruction", ""),
+                    depends_on_json=task.get("depends_on_json", "[]"),
+                    state=task.get("state", "pending"),
+                    retries=int(task.get("retries", 1)),
+                    max_tokens=int(task.get("max_tokens", 512)),
+                    timeout_s=float(task.get("timeout_s", 180.0)),
+                )
+                session.add(record)
+            for key, value in task.items():
+                if key in self.TASK_FIELDS:
+                    setattr(record, key, value)
+
+    def list_orchestration_tasks(self, job_id: str) -> list[dict[str, Any]]:
+        with session_scope() as session:
+            records = (
+                session.query(JobTask)
+                .filter(JobTask.job_id == job_id)
+                .order_by(JobTask.task_id.asc())
+                .all()
+            )
+            return [self._task_to_dict(record) for record in records]
+
+    def add_job_event(
+        self,
+        job_id: str,
+        event_type: str,
+        message: str = "",
+        *,
+        task_id: Optional[str] = None,
+        level: str = "info",
+        detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        with session_scope() as session:
+            session.add(
+                JobEvent(
+                    job_id=job_id,
+                    task_id=task_id,
+                    event_type=event_type,
+                    level=level,
+                    message=message[:4000],
+                    detail_json=json.dumps(detail or {}),
+                )
+            )
+
+    def list_job_events(
+        self,
+        job_id: str,
+        limit: int = 500,
+        after_id: int = 0,
+    ) -> list[dict[str, Any]]:
+        with session_scope() as session:
+            records = (
+                session.query(JobEvent)
+                .filter(JobEvent.job_id == job_id, JobEvent.id > after_id)
+                .order_by(JobEvent.id.asc())
+                .limit(limit)
+                .all()
+            )
+            return [
+                {
+                    "id": record.id,
+                    "job_id": record.job_id,
+                    "task_id": record.task_id,
+                    "timestamp": record.timestamp.isoformat() if record.timestamp else None,
+                    "event_type": record.event_type,
+                    "level": record.level,
+                    "message": record.message,
+                    "detail": self._safe_json(record.detail_json),
+                }
+                for record in records
+            ]
+
+    # --- Routing audit (node -> node request flow) ---
+
+    def log_routing_event(
+        self,
+        event_type: str,
+        *,
+        source: str = "server",
+        target: str = "server",
+        job_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        state: Optional[str] = None,
+        message: str = "",
+        detail: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Append one routing event. Logging must never break the request path."""
+        try:
+            with session_scope() as session:
+                session.add(
+                    RoutingEvent(
+                        event_type=event_type[:48],
+                        source_node=(source or "server")[:128],
+                        target_node=(target or "server")[:128],
+                        job_id=job_id,
+                        task_id=task_id,
+                        state=(state or "")[:32] or None,
+                        message=(message or "")[:4000],
+                        detail_json=json.dumps(detail or {}),
+                    )
+                )
+        except Exception as exc:
+            logger.warning("Could not record routing event %s: %s", event_type, exc)
+
+    def list_routing_events(
+        self,
+        limit: int = 200,
+        *,
+        after_id: int = 0,
+        event_type: Optional[str] = None,
+        node: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        with session_scope() as session:
+            query = session.query(RoutingEvent)
+            if after_id:
+                query = query.filter(RoutingEvent.id > after_id)
+            if event_type:
+                query = query.filter(RoutingEvent.event_type == event_type)
+            if node:
+                query = query.filter(
+                    (RoutingEvent.source_node == node) | (RoutingEvent.target_node == node)
+                )
+            records = query.order_by(RoutingEvent.id.desc()).limit(limit).all()
+            records.reverse()
+            return [
+                {
+                    "id": record.id,
+                    "timestamp": record.timestamp.isoformat() if record.timestamp else None,
+                    "event_type": record.event_type,
+                    "source": record.source_node,
+                    "target": record.target_node,
+                    "job_id": record.job_id,
+                    "task_id": record.task_id,
+                    "state": record.state,
+                    "message": record.message,
+                    "detail": self._safe_json(record.detail_json),
+                }
+                for record in records
+            ]
+
+    def prune_routing_events(self, keep: int = 10000) -> int:
+        """Keep the routing log bounded so a long-running server cannot grow forever."""
+        with session_scope() as session:
+            total = session.query(RoutingEvent).count()
+            excess = total - max(0, int(keep))
+            if excess <= 0:
+                return 0
+            ids = [
+                row[0]
+                for row in session.query(RoutingEvent.id)
+                .order_by(RoutingEvent.id.asc())
+                .limit(excess)
+                .all()
+            ]
+            if ids:
+                session.query(RoutingEvent).filter(RoutingEvent.id.in_(ids)).delete(
+                    synchronize_session=False
+                )
+            return len(ids)
+
+    def mark_interrupted_jobs(self) -> int:
+        """Fail jobs/tasks left non-terminal by a process exit. Never silently resume."""
+        now = utc_now()
+        reason = "Interrupted by process restart; the previous execution cannot be resumed safely."
+        count = 0
+        with session_scope() as session:
+            jobs = (
+                session.query(Job)
+                .filter(~Job.status.in_(TERMINAL_JOB_STATES))
+                .all()
+            )
+            for job in jobs:
+                job.status = "failed"
+                job.error = reason
+                job.completed_at = now
+                count += 1
+                tasks = (
+                    session.query(JobTask)
+                    .filter(
+                        JobTask.job_id == job.id,
+                        ~JobTask.state.in_(TERMINAL_TASK_STATES),
+                    )
+                    .all()
+                )
+                for task in tasks:
+                    task.state = "failed"
+                    task.error = reason
+                    task.completed_at = now
+                session.add(
+                    JobEvent(
+                        job_id=job.id,
+                        event_type="job_interrupted",
+                        level="error",
+                        message=reason,
+                    )
+                )
+        return count
+
+    @staticmethod
+    def _safe_json(value: Optional[str]) -> Any:
+        if not value:
+            return None
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return value
+
+    @staticmethod
+    def _task_to_dict(record: JobTask) -> dict[str, Any]:
+        return {
+            "task_id": record.task_id,
+            "job_id": record.job_id,
+            "title": record.title,
+            "instruction": record.instruction,
+            "depends_on": Database._safe_json(record.depends_on_json) or [],
+            "state": record.state,
+            "worker_id": record.worker_id,
+            "attempts": record.attempts,
+            "output": record.output,
+            "error": record.error,
+            "started_at": record.started_at.isoformat() if record.started_at else None,
+            "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+            "duration_ms": record.duration_ms,
+            "max_tokens": record.max_tokens,
+            "timeout_s": record.timeout_s,
+            "retries": record.retries,
+        }
+
+    @staticmethod
+    def _job_to_dict(record: Job, include_tasks: bool = True) -> dict[str, Any]:
+        payload = {
+            "id": record.id,
+            "name": record.name,
+            "prompt": record.prompt,
+            "model_name": record.model_name,
+            "status": record.status,
+            "requested_mode": record.requested_mode,
+            "execution_mode": record.execution_mode,
+            "planner_mode": record.planner_mode,
+            "plan": Database._safe_json(record.plan_json),
+            "result": record.result_text,
+            "error": record.error,
+            "created_at": record.created_at.isoformat() if record.created_at else None,
+            "started_at": record.started_at.isoformat() if record.started_at else None,
+            "completed_at": record.completed_at.isoformat() if record.completed_at else None,
+            "duration_ms": record.duration_ms,
+            "max_tokens": record.max_tokens,
+            "max_parallel_tasks": record.max_parallel_tasks,
+            "tasks_total": record.tasks_total,
+            "tasks_completed": record.tasks_completed,
+            "tasks_failed": record.tasks_failed,
+        }
+        if include_tasks:
+            payload["tasks"] = [Database._task_to_dict(task) for task in record.tasks]
+        return payload
 
 
 _GLOBAL_DB: Optional[Database] = None

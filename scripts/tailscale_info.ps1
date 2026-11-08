@@ -36,8 +36,27 @@ Write-Host "  Coordinator API: http://${tsIp}:8765" -ForegroundColor White
 Write-Host "  API Healthcheck: http://${tsIp}:8765/health" -ForegroundColor White
 Write-Host "  API Docs (OpenAPI): http://${tsIp}:8765/docs" -ForegroundColor White
 Write-Host ""
-Write-Host "Authentication Token for Remote Users:" -ForegroundColor Cyan
-Write-Host "  Header: X-RACON-TOKEN: racon-local-dev-token" -ForegroundColor Green
+$envPath = Join-Path (Split-Path -Parent $PSScriptRoot) ".env"
+function Get-EnvValue([string]$Name) {
+    if (-not (Test-Path $envPath)) { return "" }
+    $line = Get-Content $envPath | Where-Object { $_ -match "^\s*$([regex]::Escape($Name))\s*=" } | Select-Object -First 1
+    if (-not $line) { return "" }
+    return ($line -split "=", 2)[1].Trim().Trim('"').Trim("'")
+}
+$clientToken = Get-EnvValue "RACON_CLIENT_TOKEN"
+$adminToken = Get-EnvValue "AUTH_TOKEN"
+
+Write-Host "Authentication Tokens:" -ForegroundColor Cyan
+if ($clientToken) {
+    Write-Host "  Client header: X-RACON-TOKEN: $clientToken" -ForegroundColor Green
+} else {
+    Write-Host "  Client token: not configured (set RACON_CLIENT_TOKEN in .env)" -ForegroundColor Yellow
+}
+if ($adminToken) {
+    Write-Host "  Admin header : X-RACON-TOKEN: $adminToken  (operators only)" -ForegroundColor Green
+} else {
+    Write-Host "  Admin token  : not configured (set AUTH_TOKEN in .env)" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Optional: To share with users outside your Tailnet using Tailscale Funnel (Public HTTPS):" -ForegroundColor Gray
 Write-Host "  & '$tailscaleBin' funnel 8765 on" -ForegroundColor Gray

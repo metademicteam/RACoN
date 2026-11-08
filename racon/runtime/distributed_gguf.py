@@ -242,6 +242,8 @@ def inspect_gguf_metadata(file_path: str) -> Dict[str, Any]:
                         meta["context_length"] = int(val)
                     elif "embedding_length" in key:
                         meta["embedding_length"] = int(val)
+                    # Keep every scalar key so callers can estimate memory without re-parsing.
+                    meta.setdefault("metadata", {})[key] = val
     except Exception as e:
         logger.warning("Partial read of GGUF metadata: %s", e)
 

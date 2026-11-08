@@ -1,41 +1,61 @@
-# RACoN Coordinator Backend Dockerfile
+# RACoN unified server: worker ingress + admin API + desktop API + agentic scheduler.
 FROM python:3.12-slim
 
-# Prevent Python from writing .pyc files and enable unbuffered logging
+# Pinned CPU llama.cpp build. The server ships llama-server so downloaded GGUF models are
+# servable without a host runtime. Bump this tag deliberately after testing.
+ARG LLAMA_VERSION=b12110
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app \
     RACON_HOST=0.0.0.0 \
     RACON_PORT=8765 \
     RACON_DATA_DIR=/data \
-    AUTH_TOKEN=racon-local-dev-token \
-    OLLAMA_URL=http://host.docker.internal:11434 \
-    RACON_CORS_ORIGINS=*
+    RACON_MODEL_DIR=/models \
+    RACON_SERVER_MODE=true \
+    RACON_LLAMA_DIR=/opt/racon/llama \
+    LD_LIBRARY_PATH=/opt/racon/llama \
+    OLLAMA_URL=http://host.docker.internal:11434
 
 WORKDIR /app
 
-# Install system dependencies (curl for healthchecks)
+# curl powers the healthcheck; libgomp1 is required by llama.cpp's CPU backend.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
+        curl \
+        ca-certificates \
+        libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python requirements
-COPY docker/requirements-docker.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+# llama.cpp CPU binaries (llama-server + ggml-rpc-server + shared libraries).
+RUN curl -fsSL \
+        "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_VERSION}/llama-${LLAMA_VERSION}-bin-ubuntu-x64.tar.gz" \
+        -o /tmp/llama.tar.gz \
+    && mkdir -p /opt/racon/llama \
+    && tar -xzf /tmp/llama.tar.gz -C /opt/racon/llama --strip-components=1 \
+    && rm -f /tmp/llama.tar.gz \
+    && ln -sf /opt/racon/llama/llama-server /usr/local/bin/llama-server \
+    && ln -sf /opt/racon/llama/ggml-rpc-server /usr/local/bin/rpc-server \
+    && LD_LIBRARY_PATH=/opt/racon/llama /opt/racon/llama/llama-server --version
 
-# Copy backend application source
+COPY docker/requirements-docker.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+# Application source. `protocols` is a separate top-level package imported by the
+# coordinator/agent; omitting it was why enrollment failed inside the container.
 COPY backend /app/backend
-COPY cli /app/cli
+COPY protocols /app/protocols
 COPY racon /app/racon
+COPY cli /app/cli
 COPY apps/desktop/dist /app/apps/desktop/dist
 
-# Create persistent data directory
-RUN mkdir -p /data
+RUN mkdir -p /data /models
 
-EXPOSE 8765 8443
+EXPOSE 8765
 
-# Healthcheck probe
-HEALTHCHECK --interval=10s --timeout=5s --start-period=5s --retries=3 \
-    CMD curl -f http://127.0.0.1:8765/health || exit 1
+HEALTHCHECK --interval=10s --timeout=5s --start-period=25s --retries=6 \
+    CMD curl -fsS http://127.0.0.1:8765/health || exit 1
 
-# Start FastAPI coordinator service
-CMD ["python", "-m", "uvicorn", "backend.racon.api.app:app", "--host", "0.0.0.0", "--port", "8765"]
+# One process serves the desktop API, the worker ingress and /admin.
+CMD ["python", "-m", "uvicorn", "backend.racon.api.app:app", \
+     "--host", "0.0.0.0", "--port", "8765", \
+     "--proxy-headers", "--forwarded-allow-ips", "*"]

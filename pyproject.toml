@@ -1,25 +1,47 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
-name = "racon-lab"
-version = "0.1.0"
-description = "RACoN Lab - Resource-Aware Compute Orchestration Network Laboratory"
+name = "racon"
+version = "1.2.0"
+description = "RACoN - Distributed AI inference network for Windows and Linux"
+readme = "README.md"
 requires-python = ">=3.10,<3.15"
+license = { text = "Apache-2.0" }
 dependencies = [
     "PySide6>=6.5",
     "psutil>=5.9",
     "platformdirs>=4.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+    "pydantic>=2.0",
+    "pydantic-settings>=2.0",
+    "sqlalchemy>=2.0",
+    "typer>=0.9.0",
+    "rich>=13.0",
+    "httpx>=0.27.0",
+    "cryptography>=42.0.0",
+    "pywebview>=5.0",
 ]
 
 [project.optional-dependencies]
-laya = ["laya>=0.4"]
-dev = ["pytest>=7.0", "pytest-qt>=4.0"]
+laya = ["laya>=0.4.12"]
+dev = ["pytest>=7.0"]
+build = ["pyinstaller>=6.0"]
+
+[project.scripts]
+racon = "racon.__main__:main"
+racon-desktop = "racon.desktop:main"
+
+[tool.setuptools.packages.find]
+include = ["racon*", "backend*", "protocols*"]
+namespaces = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not live_laya'"
 markers = [
     "live_laya: Opt-in smoke tests using live Laya model downloads",
+    "live_runtime: Opt-in tests that require a real llama.cpp or Ollama installation",
 ]

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>RACoN — Resource-Aware Collaborative Network</title>
-  <meta name="description" content="RACoN coordinates compute across Windows and Ubuntu PCs for local-first distributed AI inference. Download the Windows installer or the Ubuntu/Linux build, or call the public API.">
+  <meta name="description" content="RACoN 1.2 gives every Windows and Ubuntu PC a local Friend AI and a network of workers. Run the server in Docker with PostgreSQL, watch every node in the admin console, or call the OpenAI-compatible API.">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -12,7 +12,11 @@
     <a class="brand" href="/">RACoN</a>
     <nav>
       <a href="#about">About</a>
+      <a href="#friend">Friend AI</a>
       <a href="#how">How it works</a>
+      <a href="#server">Server &amp; admin</a>
+      <a href="#whatsnew">What's new</a>
+      <a href="#models">Models</a>
       <a href="#api">API</a>
       <a href="#status">Status</a>
       <a href="#download" class="btn btn-small">Download</a>
@@ -22,15 +26,17 @@
   <main>
     <section class="hero">
       <p class="eyebrow">Resource-Aware Collaborative Network</p>
-      <h1>Pool your PCs for local-first AI inference.</h1>
+      <h1>One request. Many PCs. One synthesized answer.</h1>
       <p class="lead">
-        RACoN runs one model across Windows and Ubuntu machines in the same cluster. Each computer keeps its own
-        memory, and the scheduler splits the model's layers by each PC's free capacity. If a worker goes offline,
-        its layers move back to the head PC.
+        RACoN 1.2 gives every installation a Friend AI that runs on your own model and keeps
+        working offline. Run the whole server as one Docker container with PostgreSQL, watch
+        every worker and every routed request in the admin console, then switch Friend AI to
+        network mode: the planner builds a validated task graph, compatible PCs execute it,
+        and the synthesizer returns one answer with any gaps named.
       </p>
       <div class="actions">
-        <a class="btn" href="#download">Download RACoN</a>
-        <a class="btn btn-ghost" href="#api">Use the API</a>
+        <a class="btn" href="#download">Download RACoN 1.2</a>
+        <a class="btn btn-ghost" href="#models">Browse models</a>
       </div>
     </section>
 
@@ -38,25 +44,51 @@
       <h2>What RACoN is</h2>
       <div class="grid">
         <article class="card">
-          <h3>One cluster, two operating systems</h3>
-          <p>Windows and Ubuntu workers enroll the same way, advertise the same RPC endpoint, and are scheduled
-            by the same head. Mix desktop PCs and headless Ubuntu servers in one cluster.</p>
+          <h3>Agentic Task Center</h3>
+          <p>A planner decomposes the request into a task DAG. Independent tasks run in parallel;
+            dependent tasks wait for their inputs. A server-side synthesizer merges the results and
+            names anything that could not be completed.</p>
+        </article>
+        <article class="card">
+          <h3>Hardware-matched models</h3>
+          <p>RACoN measures RAM and GPU telemetry, ranks models that actually fit, and installs
+            verified GGUF files from Hugging Face with SHA-256 validation. SmolLM2 360M,
+            Qwen 2.5 0.5B and Llama 3.2 1B ship as one-click options.</p>
         </article>
         <article class="card">
           <h3>Local-first desktop app</h3>
-          <p>A native app with hardware telemetry, a scheduler lab, benchmark history and a chat panel.
-            Everything runs on your machine by default. Ubuntu Server installs can run headless with
-            <code>racon --headless</code>.</p>
+          <p>The local engine binds to loopback with a per-install token. Inference, the model
+            manager, hardware telemetry and the Task Center all work without the public network.
+            Ubuntu Server installs can run headless with <code>racon --headless</code>.</p>
         </article>
         <article class="card">
-          <h3>Honest metrics</h3>
-          <p>Hardware that does not expose real numbers reports <em>Unavailable</em> instead of a made-up figure.
-            Simulated results are labeled as simulated.</p>
+          <h3>Honest by construction</h3>
+          <p>Missing telemetry is reported as unavailable, not invented. Failed tasks become
+            <em>partial</em> results with an explicit gap list. There is no simulated inference path
+            in production code.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="friend">
+      <h2>Friend AI is the interface</h2>
+      <p class="lead">One conversation, two explicit modes. The mode actually used is always shown.</p>
+      <div class="grid">
+        <article class="card">
+          <h3>Local assistant</h3>
+          <p>On-device streaming from your own GGUF model. It never claims that remote workers were
+            used, and it keeps answering when the network or the coordinator is unavailable.</p>
         </article>
         <article class="card">
-          <h3>Safe by design</h3>
-          <p>Workers run only allow-listed task types. Public API calls need an API key. Admin controls stay on
-            loopback and are never published.</p>
+          <h3>RACoN network mode</h3>
+          <p>Submits a real orchestration job from the conversation. The reply shows the plan, each
+            task's worker and state, retries, and the synthesized answer. Cancel from the same bubble.</p>
+        </article>
+        <article class="card">
+          <h3>Honest fallback</h3>
+          <p>If no worker is reachable the job runs locally and records the mode. If planning cannot
+            produce a valid task graph, one task executes the whole request and the reason is shown —
+            never a fabricated decomposition.</p>
         </article>
       </div>
     </section>
@@ -66,15 +98,113 @@
       <ol class="steps">
         <li><strong>Install</strong> on each PC: the Windows installer or the Ubuntu tarball/.deb. Both install
           per-user and need no administrator rights.</li>
-        <li><strong>Join</strong> the cluster over Tailscale. Windows and Ubuntu workers expose only a single
-          Tailscale address for layer traffic.</li>
-        <li><strong>Serve</strong> the model on the head PC. It measures every device, including Linux workers,
-          and assigns layers in proportion to free memory.</li>
+        <li><strong>Set up Friend AI on first launch.</strong> RACoN measures RAM and GPU, recommends a
+          verified GGUF that fits, and downloads it with live progress and a SHA-256 check.</li>
+        <li><strong>Join</strong> the cluster as a worker when you want to contribute capacity. Enrollment
+          uses an Ed25519 identity; heartbeats report real CPU, RAM and active tasks.</li>
+        <li><strong>Ask Friend AI.</strong> Keep the request local, or switch to RACoN network mode: the
+          planner builds a DAG, the selector places each task, and the synthesizer returns the final
+          answer with any gaps named — in the same conversation.</li>
         <li><strong>Call</strong> the OpenAI-compatible API at <code>racon.metademic.org/v1</code> with an API key.</li>
       </ol>
-      <p class="note">Use the same llama.cpp release on every node: the RPC protocol checks versions between the
-        head and workers. Layer traffic stays on Tailscale or a private LAN; only API requests cross the public
-        internet. Multiple PCs do not form a single pooled RAM or VRAM space.</p>
+      <p class="note">RACoN 1.2's local orchestration is verified end to end. The Docker server now
+        exposes the worker ingress, desktop API, OpenAI surface and admin console from one process.
+        When a small planner cannot produce a valid task graph, the job runs as one task and records
+        why. RACoN never claims that multiple PCs pool RAM or VRAM.</p>
+    </section>
+
+    <section id="server">
+      <h2>One server. PostgreSQL. One admin console.</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Unified Docker server</h3>
+          <p>One container serves <code>/enroll</code>, <code>/heartbeat</code>, <code>/tasks/*</code>,
+            <code>/api/v1/*</code>, <code>/v1/*</code> and <code>/admin</code>. Workers reach it over
+            Tailscale, so no public port is required.</p>
+        </article>
+        <article class="card">
+          <h3>PostgreSQL state</h3>
+          <p>Nodes, jobs, tasks and the routing audit are durable in PostgreSQL. The server image also
+            ships a pinned llama.cpp build, so verified GGUF downloads are servable immediately.</p>
+        </article>
+        <article class="card">
+          <h3>Operator dashboard</h3>
+          <p>See every worker with CPU, RAM, GPU/VRAM, OS, runtimes, served models and heartbeat age.
+            Follow the live <code>source → target</code> request log. Inspect the agentic scheduler's
+            jobs, tasks and assigned workers. Run diagnostics, preview the smart router, approve,
+            revoke or dispatch a test task.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="models">
+      <h2>Verified model downloads</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>SmolLM2 360M Instruct</h3>
+          <p>270 MB · Q4_K_M · Apache-2.0. The lowest-memory option; a good first install on laptops.</p>
+        </article>
+        <article class="card">
+          <h3>Qwen 2.5 0.5B Instruct</h3>
+          <p>398 MB · Q4_K_M. Balanced instruction following for CPU-only machines.</p>
+        </article>
+        <article class="card">
+          <h3>Llama 3.2 1B Instruct</h3>
+          <p>808 MB · Q4_K_M · Llama 3.2 Community License. Higher quality when at least 2 GB of RAM is free.</p>
+        </article>
+      </div>
+      <p class="note">Each file is downloaded from Hugging Face over HTTPS and checked against the Hub's
+        SHA-256 before it is installed. A Hugging Face token is optional and never stored in the app.</p>
+    </section>
+
+    <section id="whatsnew">
+      <h2>What's new in 1.2.0</h2>
+      <ul class="facts">
+        <li><strong>Zero-setup connection</strong> — the Windows installer ships preconfigured with
+          the RACoN server URL and token, so Friend AI connects on first launch without
+          PowerShell, environment variables, or manual settings.</li>
+        <li><strong>Streaming network answers</strong> — RACoN network jobs now stream the
+          synthesized answer token by token and use the full 2048-token budget instead of
+          truncating the result.</li>
+        <li><strong>Scoped client token</strong> — the app no longer ships the server
+          administrator token. A limited client token can run jobs and chat but cannot open
+          the admin console or change server settings.</li>
+        <li><strong>Real worker inventory</strong> — every node now reports its actual CPU,
+          GPU, RAM, OS and runtimes, and the running desktop app enrolls itself as a provider
+          so it appears in the admin console with a live heartbeat.</li>
+        <li><strong>RACoN Network Gateway</strong> — one OpenAI-compatible endpoint with RACoN
+          inference keys. <code>model: "racon"</code> streams a query from one worker, or plans
+          a complex task, streams it across workers, and merges the answer. Tool calling and
+          <code>response_format</code> work with agent harnesses.</li>
+        <li><strong>Network fixed</strong> — the Docker server now exposes the worker ingress
+          (<code>/enroll</code>, <code>/heartbeat</code>, <code>/tasks/claim</code>,
+          <code>/tasks/report</code>) from the same app as the desktop API. Workers can finally join
+          the container.</li>
+        <li><strong>PostgreSQL</strong> — durable nodes, orchestration jobs, tasks and an append-only
+          <code>routing_events</code> audit. SQLite remains the desktop/test store.</li>
+        <li><strong>Admin console</strong> — a separate operator app at <code>/admin</code> with every
+          worker's CPU, RAM, GPU/VRAM, OS, runtimes and heartbeat, the live node-to-node request log,
+          the agentic scheduler's jobs and tasks, download progress and invites.</li>
+        <li><strong>GGUF inference on the server</strong> — the server image ships a pinned llama.cpp
+          build, so a verified Hugging Face GGUF downloads and serves without a host runtime. The
+          container also supports <code>RACON_RUNTIME=ollama</code>.</li>
+        <li><strong>Download reliability</strong> — resumable <code>.part</code> transfers, three
+          automatic retries, size validation and SHA-256 verification before install.</li>
+        <li><strong>Worker execution</strong> — a worker with only llama.cpp can complete distributed
+          tasks; Ollama is tried first, then the local RACoN engine. Failures stay explicit.</li>
+        <li><strong>Smart model router</strong> — <code>model: "auto"</code> classifies each request
+          (code, reasoning, chat, tool, creative, image; quick/moderate/deep), applies hard capability
+          filters, and selects a capable installed model. Every response carries the decision in
+          <code>racon.router</code>; <code>POST /api/v1/scheduler/route</code> previews it.</li>
+        <li><strong>Model-aware workers</strong> — enrollment advertises the models a worker can serve
+          (signed only when present, so older agents still verify), the selector filters by model and
+          capability, and a worker that misses the 30-second heartbeat window is excluded.</li>
+        <li><strong>Operator diagnostics</strong> — the admin console's Diagnostics tab (and
+          <code>GET /api/v1/admin/diagnostics</code>) checks PostgreSQL, the inference runtime, Ollama,
+          llama.cpp, installed models, worker liveness, the routing log and token strength.</li>
+        <li><strong>Windows and Linux 1.2.0 builds</strong> — refreshed installer, Ubuntu tarball and
+          <code>.deb</code>, with published SHA-256 checksums.</li>
+      </ul>
     </section>
 
     <section id="download">
@@ -84,8 +214,9 @@
           <span class="platform-tag" id="win-badge">Windows</span>
           <h3>RACoN for Windows (x64)</h3>
           <p>Installer. Installs to <code>%LOCALAPPDATA%\Programs\RACoN</code>. No administrator rights needed.</p>
+          <p class="muted">v1.2.0 adds the unified worker-ingress server, PostgreSQL, the operator admin console, server-side GGUF inference, and reliable resumable model downloads.</p>
           <p class="muted" id="win-meta">Size and checksum load below.</p>
-          <a class="btn" id="win-btn" href="/downloads/RACoN_Setup_v1.0.1.exe" download>Download for Windows</a>
+          <a class="btn" id="win-btn" href="/downloads/RACoN_Setup_v1.2.0.exe" download>Download for Windows</a>
           <details class="verify">
             <summary>Verify the Windows download</summary>
             <p>Compare the SHA-256 hash of the file you downloaded with the value below.</p>
@@ -97,14 +228,14 @@
           <span class="platform-tag" id="linux-badge">Ubuntu / Linux</span>
           <h3>RACoN for Ubuntu / Linux (x86_64)</h3>
           <p>Portable tarball with a per-user installer. Requires Ubuntu 24.04+ (glibc 2.38); the llama.cpp runtime ships with its own libraries.</p>
-          <p class="muted">v1.0.6 downloads and verifies the worker's model layer shard in the background, with progress in the Worker Agent log. It also includes the CPU + RPC load fix, session refresh, and portable CPU backends.</p>
-          <pre class="install-lines"><code id="linux-install">tar -xzf RACoN-linux-x86_64-v1.0.6.tar.gz
-cd RACoN-linux-x86_64-v1.0.6
+          <p class="muted">v1.2.0 includes the same unified server support, Friend AI, first-run setup and Task Center; built in Ubuntu 24.04.</p>
+          <pre class="install-lines"><code id="linux-install">tar -xzf RACoN-linux-x86_64-v1.2.0.tar.gz
+cd RACoN-linux-x86_64-v1.2.0
 ./install.sh          # desktop app, no root
 racon                 # launch
 racon --headless      # Ubuntu Server worker</code></pre>
           <p class="muted" id="linux-meta">Size and checksum load below.</p>
-          <a class="btn" id="linux-btn" href="/downloads/RACoN-linux-x86_64-v1.0.6.tar.gz" download>Download for Ubuntu</a>
+          <a class="btn" id="linux-btn" href="/downloads/RACoN-linux-x86_64-v1.2.0.tar.gz" download>Download for Ubuntu</a>
           <p class="muted" id="linux-deb-wrap" hidden>
             or install the package: <a id="linux-deb" href="#">racon.deb</a>
           </p>
@@ -119,17 +250,28 @@ racon --headless      # Ubuntu Server worker</code></pre>
 
     <section id="api">
       <h2>Public API</h2>
-      <p>An OpenAI-compatible gateway in front of the model. Any OpenAI client works with it.</p>
-      <pre><code>curl https://racon.metademic.org/v1/chat/completions \
+      <p>One OpenAI-compatible endpoint for the whole network. Any agent harness works with a
+        RACoN inference key.</p>
+      <pre><code>curl https://desktop-b7l73cl.tail6cb521.ts.net/v1/chat/completions \
   -H "Authorization: Bearer rk_your_key" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gemma-3-1b","messages":[{"role":"user","content":"Hello"}],"max_tokens":64}'</code></pre>
+  -d '{"model":"racon","messages":[{"role":"user","content":"Compare CPU vs GPU inference."}],"stream":true}'</code></pre>
       <ul class="facts">
-        <li>Endpoints: <code>/v1/chat/completions</code>, <code>/v1/completions</code>, <code>/v1/embeddings</code>, <code>/v1/models</code></li>
-        <li>Auth: <code>Authorization: Bearer rk_…</code> (keys are issued by the operator; only SHA-256 digests are stored)</li>
-        <li>Limits: 30 requests/min per client IP, 60 requests/min per key, <code>max_tokens</code> up to 2048</li>
-        <li>Errors: <code>401</code> bad key, <code>429</code> rate limit (see <code>Retry-After</code>), <code>503</code> model offline</li>
+        <li><code>model: "racon"</code> — a simple query streams from one worker; a complex task is
+          planned, split across streaming workers, and the results are merged by the synthesizer.</li>
+        <li><code>racon-single</code>, <code>racon-task</code>, and <code>racon-task:&lt;model&gt;</code>
+          override the mode or pin a worker model.</li>
+        <li>OpenAI chat, SSE streaming, tool calling and <code>response_format</code> are supported.
+          Tool requests always stay on one worker.</li>
+        <li>Auth: <code>Authorization: Bearer rk_…</code> or <code>x-api-key</code>. Keys are issued
+          from the admin console; only SHA-256 digests are stored.</li>
+        <li>Limits: per-key rate limit (default 60/min), <code>max_tokens</code> up to 32768. Errors use
+          the OpenAI envelope: <code>401</code> bad key, <code>403</code> wrong scope, <code>429</code>
+          rate limit, <code>404</code> unknown model, <code>503</code> no worker.</li>
       </ul>
+      <p class="note">Workers connect outbound to the coordinator, so they can be behind NAT. The
+        coordinator is the discovery and scheduling point; it never exposes the administrator token
+        to clients.</p>
       <p class="note">Public workloads may be visible to the operator of the machine that runs them. Do not send personal,
         confidential, medical, financial or credential data.</p>
     </section>

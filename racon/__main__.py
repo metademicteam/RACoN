@@ -1,6 +1,11 @@
-"""Entry point for `python -m racon`."""
-import sys
+"""Entry point for ``python -m racon``.
+
+Default: the product desktop shell (local engine + React UI in a native window).
+``--lab`` starts the PySide6 laboratory window instead.
+``--headless`` runs only the provider agent (used by the Linux systemd user unit).
+"""
 import logging
+import sys
 from pathlib import Path
 
 from racon.config import VERSION
@@ -21,6 +26,23 @@ def _icon_path() -> Path:
         if candidate and candidate.exists():
             return candidate
     return Path("icon.png")
+
+
+def _ensure_qt_plugin_path() -> None:
+    """Point Qt at the bundled platform plugins when running from a frozen bundle.
+
+    PyInstaller's onedir layout stores them under _internal/PySide6/Qt/plugins. Without an
+    explicit path Qt can fail with 'Could not find the Qt platform plugin "xcb" in ""'.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    import os
+
+    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    plugins = base / "PySide6" / "Qt" / "plugins"
+    if (plugins / "platforms").is_dir():
+        os.environ["QT_PLUGIN_PATH"] = str(plugins)
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(plugins / "platforms")
 
 
 def _run_headless() -> int:
@@ -54,26 +76,16 @@ def _run_headless() -> int:
     return 0
 
 
-def main():
-    # Configure root logging before anything else
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    logger = logging.getLogger("racon")
-    logger.info("RACoN v%s starting", VERSION)
-
-    if "--headless" in sys.argv:
-        sys.exit(_run_headless())
-
+def _run_qt(error: Exception | None = None) -> int:
+    """Start the PySide6 laboratory window."""
+    _ensure_qt_plugin_path()
     try:
         from PySide6.QtWidgets import QApplication
         from racon.app import RaconApp
-    except ImportError as e:
-        print(f"Missing dependency: {e}", file=sys.stderr)
+    except ImportError as exc:
+        print(f"Missing dependency: {exc}", file=sys.stderr)
         print("Install dependencies: pip install -r requirements.txt", file=sys.stderr)
-        sys.exit(1)
+        return 1
 
     app = QApplication(sys.argv)
     app.setApplicationName("RACoN")
@@ -83,28 +95,53 @@ def main():
     window = RaconApp()
 
     if "--autostart" in sys.argv:
-        # Started at desktop login (Windows Startup or Linux XDG autostart): keep the worker
-        # running in the tray without a window.
+        # Started at desktop login: keep the worker running in the tray without a window.
         from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QMenu, QSystemTrayIcon
 
         icon = QIcon(str(_icon_path()))
         tray = QSystemTrayIcon(icon, app)
         menu = QMenu()
-        menu.addAction("Open RACoN", lambda: window.show())
+        menu.addAction("Open RACoN", window.show)
         menu.addAction("Quit", app.quit)
         tray.setContextMenu(menu)
         tray.setToolTip("RACoN — joining the network in the background")
         tray.show()
         app.setQuitOnLastWindowClosed(False)
-        logger.info("RACoN started in autostart mode")
+        logging.getLogger("racon").info("RACoN started in autostart mode")
     else:
         window.show()
-        logger.info("RACoN UI launched")
+        logging.getLogger("racon").info("RACoN Qt laboratory window launched")
 
-    exit_code = app.exec()
-    logger.info("RACoN shutting down (code=%d)", exit_code)
-    sys.exit(exit_code)
+    return app.exec()
+
+
+def main() -> None:
+    from racon.logging_setup import configure_logging
+
+    configure_logging()
+    logger = logging.getLogger("racon")
+    logger.info("RACoN v%s starting", VERSION)
+
+    if "--headless" in sys.argv:
+        sys.exit(_run_headless())
+
+    if "--lab" in sys.argv or "--qt" in sys.argv:
+        sys.exit(_run_qt())
+
+    try:
+        from racon.desktop import main as desktop_main
+    except Exception as exc:
+        logger.warning("Desktop shell unavailable (%s); starting the Qt laboratory UI", exc)
+        sys.exit(_run_qt(exc))
+
+    code = desktop_main()
+    if code == 0:
+        sys.exit(0)
+
+    logger.warning("Desktop shell could not start (exit %s); starting the Qt laboratory UI", code)
+    sys.exit(_run_qt(RuntimeError(f"desktop shell exit {code}")))
+
 
 if __name__ == "__main__":
     main()

@@ -136,6 +136,25 @@ def get_cpu_name() -> str:
     return fallback.strip() if fallback else "Unknown"
 
 
+def friendly_os_name() -> str:
+    """Return a human-readable OS label instead of the raw kernel build string."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            with open("/etc/os-release", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("PRETTY_NAME="):
+                        return line.split("=", 1)[1].strip().strip('"')[:128]
+        except OSError:
+            pass
+        return f"Linux {platform.release()}".strip()
+    if system == "Windows":
+        return f"Windows {platform.version()}".strip()
+    if system == "Darwin":
+        return f"macOS {platform.mac_ver()[0]}".strip()
+    return f"{system} {platform.release()}".strip()
+
+
 def detect_gpu() -> GpuInfo:
     """Detect local GPU hardware using safe system interfaces.
 
@@ -303,8 +322,8 @@ def discover_hardware() -> HardwareSnapshot:
 
     # Operating System & Python Runtime
     try:
-        snapshot.os_name = platform.system()
-        snapshot.os_version = platform.version()
+        snapshot.os_name = friendly_os_name()
+        snapshot.os_version = platform.release()
         snapshot.os_architecture = platform.machine()
         snapshot.python_version = platform.python_version()
     except Exception as e:

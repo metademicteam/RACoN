@@ -200,30 +200,32 @@ def test_full_coordinator_agent_loopback_lifecycle(coordinator_setup, tmp_path):
     claimed_task = claim_data["task"]
     assert claimed_task["task_id"] == task_id
 
-    # 8. Worker executes workload and submits signed result
+    # 8. Worker must NOT fabricate a completion when no runtime is available.
     from protocols import TaskResultEnvelope
     exec_res, err = agent._execute_task_workload(
         claimed_task["task_type"], claimed_task["model_name"], claimed_task["parameters"]
     )
-    assert err is None
+    assert exec_res == {}
+    assert err is not None
+    assert "No inference runtime reachable" in err
 
     res_payload = canonicalize_json({
         "task_id": task_id,
         "node_id": agent.node_id,
-        "status": TaskState.COMPLETED.value,
+        "status": TaskState.FAILED.value,
         "result_data": exec_res,
         "execution_time_ms": 12.5,
-        "error": None,
+        "error": err,
     })
     worker_sig = sign_message(agent._private_key, res_payload)
 
     result_envelope = TaskResultEnvelope(
         task_id=task_id,
         node_id=agent.node_id,
-        status=TaskState.COMPLETED,
+        status=TaskState.FAILED,
         result_data=exec_res,
         execution_time_ms=12.5,
-        error=None,
+        error=err[:512],
         worker_signature=worker_sig,
     )
 
@@ -231,10 +233,10 @@ def test_full_coordinator_agent_loopback_lifecycle(coordinator_setup, tmp_path):
     assert report_resp.status_code == 200
     assert report_resp.json()["status"] == "accepted"
 
-    # 9. Verify coordinator task state updated to COMPLETED
+    # 9. Verify the coordinator recorded a failure, not invented output
     stored_task = tasks.get_task(task_id)
-    assert stored_task["state"] == "completed"
-    assert "response" in stored_task["result_data"]
+    assert stored_task["state"] == "failed"
+    assert "response" not in (stored_task["result_data"] or {})
 
     # 10. Operator revokes node
     revoke_resp = admin_client.post(f"/admin/nodes/{agent.node_id}/revoke")

@@ -3,10 +3,11 @@
 #
 # Usage:
 #   .\scripts\publish_website.ps1
-#   .\scripts\publish_website.ps1 -Version 1.0.2
+#   .\scripts\publish_website.ps1 -Version 1.1.0 -IncludeLinux
 
 param(
-    [string]$Version = "1.0.6"
+    [string]$Version = "1.1.0",
+    [switch]$IncludeLinux
 )
 
 $ErrorActionPreference = "Stop"
@@ -59,6 +60,47 @@ $platforms["windows"] = [ordered]@{
     size_bytes = $item.Length
     sha256     = $hash
     built_at   = $builtAt
+}
+
+if ($IncludeLinux) {
+    $linuxSource = Get-ChildItem (Join-Path $root "dist\installer") -Filter "RACoN-linux-*-v$Version.tar.gz" -File |
+        Select-Object -First 1
+    if (-not $linuxSource) {
+        Write-Host "Linux tarball not found for v$Version in dist\installer." -ForegroundColor Red
+        exit 1
+    }
+    $debSource = Get-ChildItem (Join-Path $root "dist\installer") -Filter "racon_${Version}_*.deb" -File |
+        Select-Object -First 1
+
+    $linuxTarget = Join-Path $downloads $linuxSource.Name
+    Copy-Item $linuxSource.FullName $linuxTarget -Force
+    Get-ChildItem $downloads -Filter "RACoN-linux-*.tar.gz" -File |
+        Where-Object { $_.FullName -ne $linuxTarget } |
+        Remove-Item -Force
+
+    $linuxItem = Get-Item $linuxTarget
+    $linuxEntry = [ordered]@{
+        file       = $linuxItem.Name
+        size_bytes = $linuxItem.Length
+        sha256     = (Get-FileHash $linuxTarget -Algorithm SHA256).Hash.ToLower()
+        built_at   = $builtAt
+    }
+
+    if ($debSource) {
+        $debTarget = Join-Path $downloads $debSource.Name
+        Copy-Item $debSource.FullName $debTarget -Force
+        Get-ChildItem $downloads -Filter "racon_*.deb" -File |
+            Where-Object { $_.FullName -ne $debTarget } |
+            Remove-Item -Force
+        $debItem = Get-Item $debTarget
+        $linuxEntry["deb"] = [ordered]@{
+            file       = $debItem.Name
+            size_bytes = $debItem.Length
+            sha256     = (Get-FileHash $debTarget -Algorithm SHA256).Hash.ToLower()
+        }
+    }
+
+    $platforms["linux"] = $linuxEntry
 }
 
 $manifest = [ordered]@{

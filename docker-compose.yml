@@ -1,29 +1,74 @@
-name: racn-coordinator
+name: racon
+
+# RACoN server stack for a Windows/Linux host (this PC is the server).
+#
+#   docker compose up -d --build
+#   Web UI     http://<tailscale-ip>:3000/?token=<AUTH_TOKEN>
+#   Admin app  http://<tailscale-ip>:8765/admin
+#   Worker API http://<tailscale-ip>:8765  (agents enroll here)
+#
+# Remote workers only need RACON_COORDINATOR_URL=http://<tailscale-ip>:8765 in their
+# environment (or the desktop app's connection panel). PostgreSQL is the durable store.
 
 services:
-  # 1. RACoN Coordinator API Service
+  # 1. PostgreSQL — durable node, job, task, routing and audit state.
+  racn-postgres:
+    image: postgres:16-alpine
+    container_name: racn-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-racon}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-racon}
+      - POSTGRES_DB=${POSTGRES_DB:-racon}
+    volumes:
+      - racon-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-racon} -d ${POSTGRES_DB:-racon}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # Intentionally not published on the host. The coordinator reaches it by service name
+    # on racon-net; use `docker exec -it racn-postgres psql ...` for administration.
+    networks:
+      - racon-net
+
+  # 2. RACoN unified server (desktop API + worker ingress + admin API + scheduler).
   racn-coordinator:
     build:
       context: .
       dockerfile: docker/Dockerfile.backend
     container_name: racn-coordinator
-    image: racn-coordinator:1.1
+    image: racon-server:1.2
     restart: unless-stopped
     ports:
       - "8765:8765"
-      - "8443:8765"
     environment:
       - RACON_HOST=0.0.0.0
       - RACON_PORT=8765
+      - RACON_SERVER_MODE=true
       - RACON_DATA_DIR=/data
-      - AUTH_TOKEN=${AUTH_TOKEN:-racon-local-dev-token}
-      - REDIS_URL=redis://racn-redis:6379/0
+      - RACON_MODEL_DIR=/models
+      - DATABASE_URL=postgresql+psycopg2://${POSTGRES_USER:-racon}:${POSTGRES_PASSWORD:-racon}@racn-postgres:5432/${POSTGRES_DB:-racon}
+      - RACON_DB_POOL_SIZE=10
+      - AUTH_TOKEN=${AUTH_TOKEN:?AUTH_TOKEN must be set in .env}
+      - RACON_CLIENT_TOKEN=${RACON_CLIENT_TOKEN:-}
+      - RACON_AUTO_APPROVE_WORKERS=${RACON_AUTO_APPROVE_WORKERS:-true}
+      - RACON_JOIN_CODE=${RACON_JOIN_CODE:-RCN-PUBLIC-JOIN}
+      - RACON_CORS_ORIGINS=${RACON_CORS_ORIGINS:-*}
+      # The image ships llama-server, so downloaded GGUF models are served directly.
+      # Do not inherit RACON_RUNTIME from the desktop .env: a host configured for Ollama
+      # would otherwise force every container request through a daemon the container
+      # cannot reach (http://host.docker.internal:11434). Operators who deliberately want
+      # Ollama in the container set RACON_SERVER_RUNTIME=ollama.
+      - RACON_RUNTIME=${RACON_SERVER_RUNTIME:-llama_cpp}
+      - RACON_LLAMA_DIR=/opt/racon/llama
+      - RACON_OLLAMA_URL=${RACON_OLLAMA_URL:-http://host.docker.internal:11434}
+      # Pin the legacy OLLAMA_URL too: the shared .env normally contains 127.0.0.1 for the
+      # desktop app, which is the container itself, not the Windows host.
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - HF_TOKEN=${HF_TOKEN:-}
       - LLAMA_SERVER_URL=http://racn-llama:8080
       - MODEL_REGISTRY_URL=http://racn-model-registry:8001
-      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
-      - NEXT_PUBLIC_SUPABASE_URL=https://aqqfhueypxkikgcbrfbn.supabase.co
-      - NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_DeyUioAnjw7JEub6D0ppSA_Veei_BQc
-      - RACON_CORS_ORIGINS=*
       - RACON_DEV_MODE=false
     volumes:
       - racon-data:/data
@@ -31,38 +76,52 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
-      racn-redis:
-        condition: service_started
-      racn-llama:
-        condition: service_started
-      racn-model-registry:
-        condition: service_started
+      racn-postgres:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8765/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/health"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      start_period: 20s
+      retries: 6
     networks:
       - racon-net
 
-  # 2. RACoN Web App Frontend
+  # 3. Web UI (nginx) — proxies /api, /v1, /admin and SSE to the coordinator.
   racn-webapp:
     build:
       context: .
       dockerfile: docker/Dockerfile.frontend
     container_name: racn-webapp
-    image: racn-webapp:1.1
+    image: racon-webapp:1.2
     restart: unless-stopped
     ports:
       - "3000:80"
-      - "1420:80"
     depends_on:
       racn-coordinator:
         condition: service_healthy
     networks:
       - racon-net
 
-  # 3. Dedicated llama.cpp CPU Inference Microservice
+  # 4. Model registry / GGUF storage view. Shares the model volume with the server.
+  racn-model-registry:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.model_registry
+    container_name: racn-model-registry
+    image: racn-model-registry:latest
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - MODELS_DIR=/models
+    volumes:
+      - racon-models:/models
+    networks:
+      - racon-net
+
+  # 5. Optional llama.cpp proxy. Set LLAMA_BACKEND_URL to a real llama-server; without it
+  #    this service answers 503 instead of inventing completions.
   racn-llama:
     build:
       context: .
@@ -73,62 +132,11 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - LLAMA_THREADS=4
+      - LLAMA_THREADS=${LLAMA_THREADS:-4}
+      - LLAMA_BACKEND_URL=${LLAMA_BACKEND_URL:-}
+      - LLAMA_BACKEND_API_KEY=${LLAMA_BACKEND_API_KEY:-}
     volumes:
       - racon-models:/models
-    networks:
-      - racon-net
-
-  # 4. Dedicated Model Registry & GGUF Storage Service
-  racn-model-registry:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.model_registry
-    container_name: racn-model-registry
-    image: racn-model-registry:latest
-    restart: unless-stopped
-    ports:
-      - "8001:8001"
-      - "9003:8001"
-    environment:
-      - MODELS_DIR=/models
-    volumes:
-      - racon-models:/models
-    networks:
-      - racon-net
-
-  # 5. Redis State Cache & Worker Coordination Queue
-  racn-redis:
-    image: redis:7-alpine
-    container_name: racn-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - racon-redis-data:/data
-    networks:
-      - racon-net
-
-  # 6. Tailscale Funnel Public Internet Gateway (Profile: funnel)
-  # Run: docker compose --profile funnel up -d
-  racn-funnel:
-    image: tailscale/tailscale:latest
-    container_name: racn-funnel
-    profiles:
-      - funnel
-      - tailscale
-    restart: unless-stopped
-    hostname: racon-cluster
-    environment:
-      - TS_AUTHKEY=${TS_AUTHKEY:-}
-      - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=true
-      - TS_EXTRA_ARGS=--advertise-tags=tag:container
-    volumes:
-      - racon-tailscale-state:/var/lib/tailscale
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     networks:
       - racon-net
 
@@ -137,9 +145,7 @@ volumes:
     driver: local
   racon-models:
     driver: local
-  racon-redis-data:
-    driver: local
-  racon-tailscale-state:
+  racon-postgres-data:
     driver: local
 
 networks:

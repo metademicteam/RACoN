@@ -5,29 +5,88 @@
 ---
 
 ## 1. Overview
-RACoN is a local-first platform designed to aggregate, manage, and coordinate CPU, GPU, and memory resources for distributed AI execution across **Windows and Ubuntu/Linux** machines in one cluster.
+RACoN is a distributed AI inference network for **Windows and Ubuntu/Linux**. Providers host
+models on their own machines; consumers call an OpenAI-compatible API and RACoN routes each
+request to a machine that can serve it.
+
 The platform integrates:
-1. **Desktop Management Application**: Built with **Tauri v2 + React 18 (TypeScript, Vite, TailwindCSS)**.
-2. **Local Coordinator Backend**: High-performance **FastAPI** service bound strictly to loopback (`127.0.0.1:8765`) protected by an ephemeral authorization token.
-3. **Hardware Discovery**: Safe, non-fabricated telemetry via `psutil` and native Windows platform interfaces (Intel UHD 630 iGPU safe fallback).
-4. **Laya Decision Advisor**: Integrated using official Laya `Router.predict` with typed choice decision primitives in **Deterministic**, **Shadow**, and **Laya-Assisted** modes.
-5. **Model Runtimes**: Local model integration with **Ollama** (`127.0.0.1:11434`) and distributed tensor execution protocol abstraction.
-6. **Local Persistence**: **SQLAlchemy 2.0 + SQLite WAL** with support for optional Supabase cloud syncing.
-7. **Companion CLI**: Typer-based developer CLI (`racon status`, `racon node list`, `racon scheduler preview`, etc.).
+
+1. **Desktop Application** — React 18 + Vite UI hosted by `racon/desktop.py` in a native
+   pywebview window (Edge WebView2 on Windows, WebKitGTK/Chromium on Linux). PySide6 remains
+   for the `--lab` window, the `--autostart` tray and the `--headless` provider agent.
+2. **Friend AI** — the primary interface. A local persona streams from the on-device runtime;
+   a **RACoN network** mode submits a real orchestration job and renders the plan, per-task
+   workers, live state, and synthesized answer, with explicit partial/failed reporting.
+   First launch offers a verified model chosen from measured hardware.
+3. **Local Engine** — FastAPI bound to loopback, protected by a per-install token. Serves the
+   UI, the OpenAI-compatible `/v1/*` surface and the management API on a single port.
+4. **Runtime Adapters** — a single `InferenceRuntime` contract with real **llama.cpp** and
+   **Ollama** implementations. Streaming, cancellation and token accounting are uniform.
+5. **Model Manager** — discovery, HTTPS-only download, SHA-256 verification, disk guards and
+   memory estimates derived from real GGUF header geometry. Hardware-ranked downloads come
+   from Hugging Face (`SmolLM2 360M`, `Qwen 2.5 0.5B`, `Llama 3.2 1B`) and Ollama tags.
+6. **Hardware Discovery** — `psutil` plus platform interfaces. Values that cannot be measured
+   (integrated-GPU VRAM, for example) are reported as unavailable, never invented.
+7. **Agentic Orchestration** — a server-side planner decomposes a request into a validated
+   task DAG, a weighted selector places each task on a suitable worker, results are validated,
+   and a synthesis agent merges them while naming anything that could not be completed.
+8. **Schedulers** — a deterministic scorer today (Laya-assisted as an optional adviser), with
+   the orchestration selector as the job-aware placement layer.
+9. **Companion CLI** — Typer-based administration client (`racon status`, `racon doctor`, …).
+10. **Server mode & operator console** — one Docker container serves the worker ingress
+    (`/enroll`, `/heartbeat`, `/tasks/*`), the desktop API and a standalone admin dashboard at
+    `/admin`. PostgreSQL stores durable node, job, task and routing state. Workers reach the
+    server over Tailscale.
+11. **Smart model router & diagnostics** — `model: "auto"` classifies a request
+    (code/reasoning/chat/tool/creative/image; quick/moderate/deep), applies hard capability
+    filters, and selects an installed model with a fully recorded decision. Workers advertise
+    their model inventory; stale heartbeats are excluded. The admin **Diagnostics** tab checks
+    PostgreSQL, runtimes, models, workers, routing and token strength.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for module ownership and data flow.
+
+---
+
+## Server deployment (this PC as the server)
+
+The container is the deployable unit. It runs the unified FastAPI app, PostgreSQL and the
+web UI together:
+
+```powershell
+Copy-Item .env.example .env    # set AUTH_TOKEN and POSTGRES_PASSWORD
+.\scripts\start_server.ps1
+```
+
+| Surface | URL |
+|---|---|
+| Desktop web UI | `http://<tailscale-ip>:3000/?token=<AUTH_TOKEN>` |
+| Admin dashboard | `http://<tailscale-ip>:8765/admin` |
+| Worker ingress | `http://<tailscale-ip>:8765` |
+
+A remote provider joins with:
+
+```powershell
+$env:RACON_COORDINATOR_URL = "http://<tailscale-ip>:8765"
+$env:RACON_JOIN_CODE = "RCN-PUBLIC-JOIN"
+.\scripts\start_worker.ps1 -Server $env:RACON_COORDINATOR_URL -Headless
+```
+
+Full instructions, firewall rules, PostgreSQL backup and troubleshooting:
+[`docs/SERVER_DEPLOYMENT.md`](docs/SERVER_DEPLOYMENT.md).
 
 ---
 
 ## 2. Quick Start
 
 ### 2.1 Prerequisites
-- **Windows 11 (64-bit)** or **Ubuntu 24.04+ (x86_64)** (build on 22.04 for 22.04 support)
+- **Windows 11 (64-bit)** or **Ubuntu 24.04+ (x86_64)**
 - **Python 3.12**
-- **Node.js v20+**
-- **Rust (rustc/cargo 1.80+)** — only for the Tauri frontend
-- **llama.cpp** with RPC enabled (`rpc-server`, `llama-server`, `llama-cli`)
+- **Node.js v20+** — only to rebuild the UI
+- **llama.cpp** with `llama-server` (e.g. `winget install ggml.llamacpp`, or a build under
+  `/opt/racon/llama`)
+- *(Optional)* **Ollama** at `http://127.0.0.1:11434`
 - *(Optional)* **Tailscale** to connect machines over a private mesh
-- *(Optional)* **Ollama** running locally at `http://127.0.0.1:11434`
-- *(Optional)* `laya` package (`pip install laya`)
+- *(Optional)* `laya` package for the advisory scheduler
 
 ---
 
@@ -42,25 +101,22 @@ or via PowerShell:
 .\run.ps1
 ```
 
-#### Option B: Launch Desktop via Tauri Dev
+#### Option B: Product desktop shell (Windows and Linux)
 ```powershell
-# 1. Start FastAPI Coordinator Backend
-.\.venv\Scripts\python.exe -m uvicorn backend.racon.api.app:app --host 127.0.0.1 --port 8765
-
-# 2. In another terminal, launch Tauri v2 Desktop UI
-cd apps\desktop
-npm run tauri dev
+.\.venv\Scripts\python.exe -m racon.desktop
 ```
+This starts the engine on a free loopback port and opens the product UI. It is the same entry
+point the installer uses.
 
 #### Option C: Ubuntu / Linux
 ```bash
-# Native desktop app (PySide6), or a headless cluster worker
 ./scripts/build_linux.sh
-tar -xzf dist/installer/RACoN-linux-x86_64-v1.0.6.tar.gz
-cd RACoN-linux-x86_64-v1.0.6
+tar -xzf dist/installer/RACoN-linux-x86_64-v1.1.0.tar.gz
+cd RACoN-linux-x86_64-v1.1.0
 ./install.sh
-racon                 # desktop app
-racon --headless      # Ubuntu Server worker
+racon                 # product desktop shell
+racon --lab           # PySide6 laboratory window
+racon --headless      # Ubuntu Server provider agent
 ```
 See [`docs/BUILD_LINUX.md`](docs/BUILD_LINUX.md) for llama.cpp, `.deb` packaging, Tailscale and
 cross-OS cluster setup.
@@ -100,12 +156,16 @@ Run the full automated test suite:
 .\.venv\Scripts\python.exe -m pytest tests -v
 ```
 
-All 80 unit and integration tests cover:
+All 286 selected tests (3 live-Laya tests are opt-in) cover:
+- Agentic orchestration: plan schema bounds, DAG validation and cycle rejection, planner repair and single-task fallback, dependency-ordered parallel execution, retries, partial results, cancellation, restart recovery, and the HTTP job surface end to end.
+- Worker selection: hard constraints, weighted scoring, configurable weights, and honest reporting of unmeasured telemetry.
+- Runtime adapter contracts for llama.cpp and Ollama — streaming, cancellation, real usage reporting, crash classification.
+- Model manager: SHA-256 verification, disk guard, interrupted downloads, refusal of non-HTTPS or unverified sources.
+- SQLite migrations, including upgrading a legacy database without data loss.
 - FastAPI REST API v1 endpoints (health, status, nodes, models, scheduler preview, jobs, benchmarks, settings, logs).
-- Hardware telemetry non-fabrication (Intel UHD 630 iGPU safe fallback).
-- Ollama runtime inspection and execution error handling.
-- Distributed runtime simulation labeling and task state machine transitions (`QUEUED` -> `VALIDATING` -> `SCHEDULED` -> `RUNNING` -> `COMPLETED`/`FAILED`).
-- Worker manager local node registration and heartbeat timeout detection.
+- OpenAI-compatible `/v1/models` and `/v1/chat/completions`, including SSE framing and authentication.
+- Hardware telemetry non-fabrication (integrated-GPU VRAM reported unavailable).
+- Worker task state machine, including the invariant that a worker with no runtime reports a failure instead of a placeholder result.
 - Deterministic constraint checking and scoring formulas across all 4 objectives.
 - Laya adapter lifecycle, timeout, and fallback.
 - SQLite WAL durability and transactions across reconnects.
@@ -114,24 +174,33 @@ All 80 unit and integration tests cover:
 
 ## 5. Architectural Principles
 
-1. **System RAM is not GPU VRAM**: Resource checks explicitly account for device-specific memory constraints.
-2. **Strict Non-Fabrication**: Integrated GPUs (e.g., Intel UHD 630) that do not expose standard queryable VRAM metrics report `Unavailable` rather than synthetic numbers.
-3. **Laya Decision Scope**: Laya evaluates typed candidate decisions; it does not generate chat responses or override hard constraints.
-4. **Local-First Security**: Internal APIs bind strictly to loopback (`127.0.0.1`) and require ephemeral authorization tokens.
-5. **No Orphan Processes**: Native Tauri sidecar lifecycle ensures child Python and worker processes terminate cleanly upon exit.
+1. **System RAM is not GPU VRAM**: resource checks account for device-specific memory.
+2. **Strict Non-Fabrication**: anything that cannot be measured is reported as unavailable. There is no simulated inference path in production code.
+3. **Laya/agentic scope**: planners propose; deterministic validation decides. They cannot bypass quotas, permissions or hardware limits.
+4. **Local-First Security**: the engine binds to loopback with a per-install token. No shared default token ships in any build.
+5. **No Orphan Processes**: the runtime adapter terminates `llama-server` and closes its log handle on unload, error and shutdown.
 
 ---
 
 ## 6. Documentation Index
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — Comprehensive system architecture and layer boundaries.
-- [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — Multi-phase milestones and deliverables.
-- [`docs/MVP_ACCEPTANCE.md`](docs/MVP_ACCEPTANCE.md) — Acceptance criteria and test matrix.
-- [`docs/SECURITY.md`](docs/SECURITY.md) — Threat model and security policy.
+- [`docs/SERVER_DEPLOYMENT.md`](docs/SERVER_DEPLOYMENT.md) — **server mode**: Windows host, Tailscale, PostgreSQL, Docker, admin dashboard and worker enrollment.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — **current** module ownership, data flow and failure behaviour, including the orchestration layer.
+- [`docs/PHASE1_AUDIT.md`](docs/PHASE1_AUDIT.md) — evidence-based repository audit (2026-11-05).
+- [`docs/DEVELOPMENT_ROADMAP.md`](docs/DEVELOPMENT_ROADMAP.md) — phased plan with status and acceptance criteria.
+- [`docs/TASK_EXECUTION_PROTOCOL.md`](docs/TASK_EXECUTION_PROTOCOL.md) — job/task DAG lifecycle, dispatch, validation and synthesis rules.
+- [`docs/WORKER_PROTOCOL.md`](docs/WORKER_PROTOCOL.md) — enrollment, heartbeat, claim, signing and result reporting.
+- [`docs/MODEL_REGISTRY.md`](docs/MODEL_REGISTRY.md) — catalog format, install guarantees, memory estimates, shard manifest.
+- [`docs/HUGGINGFACE_MODELS.md`](docs/HUGGINGFACE_MODELS.md) — verified Hugging Face downloads, token handling, built-in artifacts.
+- [`docs/API_SPECIFICATION.md`](docs/API_SPECIFICATION.md) — every HTTP surface, auth, limits and job schemas.
+- [`docs/DEVELOPMENT_STATUS.md`](docs/DEVELOPMENT_STATUS.md) — what is done, verified, broken and next.
+- [`docs/SUPABASE_SCHEMA.md`](docs/SUPABASE_SCHEMA.md) — read-only snapshot of the shared control-plane schema.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — historical hub-and-spoke design and ADR-001…015.
+- [`docs/SECURITY.md`](docs/SECURITY.md) — threat model and security policy.
+- [`docs/SCHEDULER.md`](docs/SCHEDULER.md) — scoring rules and hard-constraint logic.
 - [`docs/LAYA_INTEGRATION.md`](docs/LAYA_INTEGRATION.md) — Laya decision engine integration details.
-- [`docs/SCHEDULER.md`](docs/SCHEDULER.md) — Mathematical scoring rules and hard-constraint logic.
-- [`docs/DISTRIBUTED_RUNTIME.md`](docs/DISTRIBUTED_RUNTIME.md) — Worker protocol and execution mode boundaries.
-- [`docs/TAILSCALE_DOCKER.md`](docs/TAILSCALE_DOCKER.md) — Tailscale mesh remote access and Docker container deployment guide.
+- [`docs/CLUSTER_LAYER_SCHEDULING.md`](docs/CLUSTER_LAYER_SCHEDULING.md) — Stage-2 layer split policy.
+- [`docs/RPC_LINK_MEASUREMENTS.md`](docs/RPC_LINK_MEASUREMENTS.md) — measured RPC throughput and its consequences.
 - [`docs/BUILD_WINDOWS.md`](docs/BUILD_WINDOWS.md) — Windows packaging and installer compilation.
 - [`docs/BUILD_LINUX.md`](docs/BUILD_LINUX.md) — Ubuntu/Linux build, install, headless worker and cross-OS cluster.
-- [`docs/ZERO_CONFIG.md`](docs/ZERO_CONFIG.md) — Auto-join, autostart, gateway keys and cluster discovery.
-- [`CHANGELOG.md`](CHANGELOG.md) — Version history and release notes.
+- [`docs/ZERO_CONFIG.md`](docs/ZERO_CONFIG.md) — auto-join, autostart, gateway keys and cluster discovery.
+- [`CHANGELOG.md`](CHANGELOG.md) — version history and release notes.

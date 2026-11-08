@@ -28,13 +28,14 @@ export interface NodeItem {
   id: string;
   name: string;
   is_local: boolean;
-  status: "available" | "busy" | "offline" | "unregistered";
+  status: string;
   host: string;
   port: number;
   cpu_cores: number;
   ram_total_mb: number;
   ram_available_mb: number;
   gpu_name?: string | null;
+  device_type?: string;
   last_heartbeat?: string;
 }
 
@@ -56,13 +57,18 @@ export interface CatalogModelItem {
   size_bytes: number;
   size_display: string;
   parameter_size: string;
-  accuracy_score: number;
-  speed_score: number;
+  accuracy_score: number | null;
+  speed_score: number | null;
   recommended_ram_gb: number;
   format: string;
   tags: string[];
   streaming: boolean;
   is_installed: boolean;
+  source?: string;
+  repo_id?: string | null;
+  filename?: string | null;
+  downloadable?: boolean;
+  license?: string;
   pull_status?: {
     status: "idle" | "pulling" | "downloading" | "verifying" | "completed" | "failed" | "installed";
     percentage: number;
@@ -110,28 +116,96 @@ export interface SchedulerPreviewResult {
   evaluations: SchedulerPreviewCandidate[];
 }
 
+/** One node of a job's task DAG, as persisted by the orchestration service. */
+export interface JobTaskItem {
+  task_id: string;
+  job_id: string;
+  title: string;
+  instruction: string;
+  depends_on: string[];
+  state: "pending" | "assigned" | "running" | "completed" | "failed" | "cancelled" | string;
+  worker_id: string | null;
+  attempts: number;
+  output: string | null;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number;
+  max_tokens: number;
+  timeout_s: number;
+  retries: number;
+}
+
+export interface PlanTask {
+  task_id: string;
+  title: string;
+  instruction: string;
+  depends_on: string[];
+}
+
 export interface JobItem {
   id: string;
-  model_name: string;
-  status: "queued" | "validating" | "scheduled" | "running" | "completed" | "failed" | "cancelled";
+  name: string;
   prompt: string;
-  response: string | null;
-  assigned_node_id: string | null;
-  created_at: string;
-  duration_ms?: number;
-  error?: string | null;
+  model_name: string;
+  status:
+    | "queued"
+    | "planning"
+    | "running"
+    | "synthesizing"
+    | "completed"
+    | "partial"
+    | "failed"
+    | "cancelled"
+    | string;
+  requested_mode: string;
+  execution_mode: string | null;
+  planner_mode: string | null;
+  plan: { objective?: string; tasks?: PlanTask[]; synthesis?: string; planner_note?: string } | null;
+  result: string | null;
+  error: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number;
+  max_tokens: number;
+  max_parallel_tasks: number;
+  tasks_total: number;
+  tasks_completed: number;
+  tasks_failed: number;
+  tasks?: JobTaskItem[];
+}
+
+export interface CreateJobPayload {
+  name?: string;
+  model_name: string;
+  prompt: string;
+  max_tokens?: number;
+  decompose?: boolean;
+  execution_mode?: "auto" | "local" | "distributed";
+  max_parallel_tasks?: number;
 }
 
 export interface BenchmarkRecord {
-  id: string;
+  run_id: string;
   timestamp: string;
-  scenario: string;
+  scenario_name: string;
   objective: string;
   mode: string;
-  winner: string | null;
-  score: number | null;
-  duration_ms: number;
+  final_choice: string | null;
+  final_score: number | null;
+  decision_duration_ms: number;
   success: boolean;
+}
+
+export interface LogEvent {
+  id?: number;
+  timestamp?: string;
+  level?: string;
+  logger?: string;
+  message: string;
+  event_type?: string;
+  details?: string;
 }
 
 export interface SystemStatus {

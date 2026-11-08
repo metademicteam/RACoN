@@ -214,6 +214,70 @@ class InferenceWorker(QThread):
     def cancel(self):
         self._is_cancelled = True
 
+    def _gateway_targets(self):
+        """Local head gateway first (loopback, streaming), then the public gateway."""
+        gw_url, gw_key = gateway_config()
+        targets = []
+        if not gw_key:
+            return targets
+        local = "http://127.0.0.1:8000"
+        try:
+            if httpx.get(f"{local}/health", timeout=1.5).status_code == 200:
+                targets.append((local, gw_key, "Local Gateway"))
+        except httpx.HTTPError:
+            pass
+        if gw_url and all(url != gw_url for url, _, _ in targets):
+            targets.append((gw_url, gw_key, "Remote Gateway"))
+        return targets
+
+    def _stream_from_gateway(self, url, key, label, start_time, reasons) -> bool:
+        retry_deadline = time.time() + 180.0
+        while True:
+            emitted = []
+
+            def _handle_token(tok):
+                emitted.append(tok)
+                self.token_generated.emit(tok)
+
+            try:
+                content, extra = _chat_stream_request(
+                    url, key, self.model_name, self.messages,
+                    self.max_tokens, self.temperature,
+                    on_token=_handle_token,
+                    is_cancelled=lambda: self._is_cancelled,
+                )
+                if not content:
+                    data = _chat_request(url, key, self.model_name, self.messages,
+                                         self.max_tokens, self.temperature)
+                    content = data["choices"][0]["message"]["content"]
+                    extra = {"eval_tokens": len(content.split())}
+
+                duration = time.time() - start_time
+                eval_tokens = extra.get("eval_tokens", len(content.split()))
+                stats = {
+                    "prompt_tps": 0.0,
+                    "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
+                    "duration_s": round(duration, 2),
+                    "device": f"{label} ({url})",
+                    "memory": {},
+                }
+                self.completed.emit(content, stats)
+                return True
+            except Exception as e:
+                message = str(e)
+                if (
+                    "loading model" in message.lower()
+                    and not emitted
+                    and not self._is_cancelled
+                    and time.time() < retry_deadline
+                ):
+                    logger.info("%s is loading the model; retrying in 5s.", label)
+                    time.sleep(5.0)
+                    continue
+                logger.warning("%s failed: %s", label, e)
+                reasons.append(f"{label.lower()} {url}: {e}")
+                return False
+
     def run(self):
         start_time = time.time()
         # Format prompt
@@ -226,8 +290,26 @@ class InferenceWorker(QThread):
 
         reasons: List[str] = []
 
-        # 1. Local GGUF model (GPU, then CPU)
-        model_path = resolve_local_model_path()
+        # 1. Streaming gateway first: local head on this PC, then the public gateway. This gives
+        # token-by-token output on Windows instead of the non-streaming llama-cli path.
+        mode = self.inference_mode.lower()
+        want_local_rpc = "rpc" in mode
+        local_model = resolve_local_model_path()
+        # "Local Model + RPC Workers" needs a local GGUF. Without one, use the gateway so a
+        # worker PC (or an installed app that does not bundle the model) still gets an answer.
+        if not want_local_rpc or not local_model:
+            targets = self._gateway_targets()
+            if targets:
+                for url, key, label in targets:
+                    if self._stream_from_gateway(url, key, label, start_time, reasons):
+                        return
+            else:
+                reasons.append(
+                    "no gateway configured (set RACON_API_KEY or enroll this PC to write gateway.json)"
+                )
+
+        # 2. Local GGUF model (GPU, then CPU)
+        model_path = local_model
         if model_path:
             try:
                 engine = DistributedPipelineEngine()
@@ -268,89 +350,7 @@ class InferenceWorker(QThread):
         else:
             reasons.append(f"no GGUF model on this PC (set RACON_GGUF_MODEL, expected {DEFAULT_GGUF_MODEL})")
 
-        # 2. Remote RACoN gateway with an API key (env or gateway.json)
-        gw_url, gw_key = gateway_config()
-        if gw_url and gw_key:
-            # A worker joining or leaving restarts llama-server on the head. The gateway answers
-            # 503 "Loading model" during that window; wait it out instead of falling back.
-            retry_deadline = time.time() + 120.0
-            while True:
-                emitted: List[str] = []
-
-                def _handle_gw_token(tok: str):
-                    emitted.append(tok)
-                    self.token_generated.emit(tok)
-
-                try:
-                    content, extra = _chat_stream_request(
-                        gw_url, gw_key, self.model_name, self.messages,
-                        self.max_tokens, self.temperature,
-                        on_token=_handle_gw_token,
-                        is_cancelled=lambda: self._is_cancelled,
-                    )
-                    if not content:
-                        # Fallback to non-streaming if stream yielded no tokens
-                        data = _chat_request(gw_url, gw_key, self.model_name, self.messages,
-                                             self.max_tokens, self.temperature)
-                        content = data["choices"][0]["message"]["content"]
-                        extra = {"eval_tokens": len(content.split())}
-
-                    duration = time.time() - start_time
-                    eval_tokens = extra.get("eval_tokens", len(content.split()))
-                    stats = {
-                        "prompt_tps": 0.0,
-                        "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
-                        "duration_s": round(duration, 2),
-                        "device": f"Remote Gateway ({gw_url})",
-                        "memory": {},
-                    }
-                    self.completed.emit(content, stats)
-                    return
-                except Exception as e:
-                    message = str(e)
-                    loading = "loading model" in message.lower()
-                    if loading and not emitted and not self._is_cancelled and time.time() < retry_deadline:
-                        logger.info("Remote gateway is loading the model; retrying in 5s.")
-                        time.sleep(5.0)
-                        continue
-                    logger.warning("Remote gateway failed: %s", e)
-                    reasons.append(f"remote gateway {gw_url}: {e}")
-                    break
-        else:
-            reasons.append("no remote gateway configured (set RACON_API_KEY or enroll this PC to write gateway.json)")
-
-        # 3. Local backend on this PC (OpenAI-compatible, usually backed by Ollama)
-        try:
-            def _handle_local_token(tok: str):
-                self.token_generated.emit(tok)
-
-            content, extra = _chat_stream_request(
-                "http://127.0.0.1:8765", "", self.model_name, self.messages,
-                self.max_tokens, self.temperature,
-                on_token=_handle_local_token,
-                is_cancelled=lambda: self._is_cancelled,
-            )
-            if not content:
-                data = _chat_request("http://127.0.0.1:8765", "", self.model_name, self.messages,
-                                     self.max_tokens, self.temperature)
-                content = data["choices"][0]["message"]["content"]
-                extra = {"eval_tokens": len(content.split())}
-
-            duration = time.time() - start_time
-            eval_tokens = extra.get("eval_tokens", len(content.split()))
-            stats = {
-                "prompt_tps": 0.0,
-                "eval_tps": round(eval_tokens / max(duration, 0.01), 1),
-                "duration_s": round(duration, 2),
-                "device": "RACoN Coordinator Gateway",
-                "memory": {},
-            }
-            self.completed.emit(content, stats)
-            return
-        except Exception as e:
-            reasons.append(f"local coordinator gateway: {e}")
-
-        # 4. Direct Ollama REST fallback
+        # 3. Direct Ollama REST fallback
         try:
             with httpx.Client(timeout=30.0) as client:
                 resp = client.post(
@@ -436,8 +436,8 @@ class ChatPanel(QWidget):
         header_layout.addWidget(QLabel("Execution Mode:"))
         self._mode_combo = QComboBox()
         self._mode_combo.addItems([
-            "Auto / Local Hardware",
-            "Distributed RPC Worker",
+            "Auto / Gateway First",
+            "Local Model + RPC Workers",
             "Coordinator Gateway",
         ])
         header_layout.addWidget(self._mode_combo)

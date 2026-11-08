@@ -9,7 +9,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="$(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$ROOT/racon/config.py" | head -n 1)"
-VERSION="${VERSION:-1.0.6}"
+VERSION="${VERSION:-1.1.0}"
 PUBLISH_WINDOWS=0
 PUBLISH_LINUX=0
 

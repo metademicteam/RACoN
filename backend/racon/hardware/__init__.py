@@ -5,6 +5,7 @@ from backend.racon.hardware.discovery import (
     HardwareSnapshot,
     detect_gpu,
     discover_hardware,
+    friendly_os_name,
     get_cpu_name,
     get_lightweight_update,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "HardwareSnapshot",
     "detect_gpu",
     "discover_hardware",
+    "friendly_os_name",
     "get_cpu_name",
     "get_lightweight_update",
 ]

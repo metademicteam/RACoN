@@ -106,18 +106,21 @@ def test_head_command_uses_active_workers_and_split():
     active = [cfg.workers[0]]
     cmd = build_head_command(cfg, "llama-server", "k", plan=plan, active_workers=active)
     assert cmd[cmd.index("--rpc") + 1] == "100.1.1.1:50052"
-    assert "-ts" in cmd
+    assert cmd[cmd.index("-dev") + 1] == "RPC0"
+    assert cmd[cmd.index("-ngl") + 1] == str(plan.total_layers - plan.layers_for(HEAD))
+    assert cmd[cmd.index("-ts") + 1] == "1.0"
 
 
 class _FakeHead:
     def __init__(self):
         self.restarts = []
         self.running = False
+        self.last_load = {}
 
     def is_running(self):
         return self.running
 
-    def restart(self, plan, active_workers):
+    def restart(self, plan, active_workers, startup_timeout=300.0, stall_timeout=0.0):
         self.restarts.append([w.name for w in active_workers])
         self.running = True
 
@@ -132,10 +135,37 @@ def _probe_factory(free_by_addr, local_free=8000.0):
     return probe
 
 
-def _cfg(tmp_path, workers):
+def _cfg(tmp_path, workers, policy="always", model_bytes=1024):
     model = tmp_path / "m.gguf"
-    model.write_bytes(b"\0" * 1024)  # tiny file: the supervisor tests inject probe memory, not model size
-    return ClusterConfig(model_path=str(model), total_layers=26, workers=workers)
+    model.write_bytes(b"\0" * model_bytes)  # tiny file: the supervisor tests inject probe memory, not model size
+    return ClusterConfig(
+        model_path=str(model), total_layers=26, workers=workers, worker_layer_policy=policy
+    )
+
+
+def test_supervisor_excludes_high_latency_worker(tmp_path):
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers)
+    sup = ClusterSupervisor(
+        cfg, _FakeHead(),
+        probe=_probe_factory({"100.1.1.1:50052": 3000.0}),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 228.0,
+    )
+    assert sup._update_reachability() == []
+
+
+def test_supervisor_can_force_slow_worker(tmp_path):
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers)
+    cfg.allow_slow_workers = True
+    sup = ClusterSupervisor(
+        cfg, _FakeHead(),
+        probe=_probe_factory({"100.1.1.1:50052": 3000.0}),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 228.0,
+    )
+    assert sup._update_reachability() == workers
 
 
 def test_supervisor_does_not_restart_when_membership_stable(tmp_path):
@@ -146,6 +176,7 @@ def test_supervisor_does_not_restart_when_membership_stable(tmp_path):
         cfg, head,
         probe=_probe_factory({"100.1.1.1:50052": 3000.0}),
         reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
     )
     assert sup.reconcile() is not None
     assert sup.reconcile() is None
@@ -162,6 +193,7 @@ def test_supervisor_replans_after_worker_drops(tmp_path):
         cfg, head,
         probe=_probe_factory({"100.1.1.1:50052": 200.0, "100.1.1.2:50052": 200.0}),
         reachable=lambda h, p: f"{h}:{p}" in up,
+        latency=lambda h, p: 0.0,
         failures_before_drop=2,
     )
     sup.reconcile()
@@ -183,6 +215,7 @@ def test_supervisor_restores_worker_on_recovery(tmp_path):
         cfg, head,
         probe=_probe_factory({"100.1.1.1:50052": 3000.0}),
         reachable=lambda h, p: f"{h}:{p}" in up,
+        latency=lambda h, p: 0.0,
         failures_before_drop=1,
     )
     sup.reconcile()
@@ -192,3 +225,153 @@ def test_supervisor_restores_worker_on_recovery(tmp_path):
     up.add("100.1.1.1:50052")
     sup.reconcile()
     assert head.restarts[-1] == ["a"]
+
+
+def test_planner_caps_layers_per_worker():
+    plan = plan_layers(
+        26, head_free_mb=8000, worker_free_mb={"a": 8000}, bytes_per_layer_mb=20.0,
+        worker_order=["a"], max_worker_layers=3,
+    )
+    assert plan.layers_for("a") <= 3
+    assert plan.layers_for("a") + plan.layers_for(HEAD) == 26
+
+
+def test_planner_cap_of_one_keeps_a_small_worker():
+    # A cap below the default minimum must still be honored, otherwise the cap would be unusable.
+    plan = plan_layers(
+        26, head_free_mb=8000, worker_free_mb={"a": 8000}, bytes_per_layer_mb=20.0,
+        worker_order=["a"], max_worker_layers=1,
+    )
+    assert plan.layers_for("a") == 1
+    assert plan.dropped_workers == ()
+
+
+def test_planner_rejects_negative_cap():
+    with pytest.raises(ValueError, match="max_worker_layers"):
+        plan_layers(
+            26, head_free_mb=8000, worker_free_mb={"a": 8000}, bytes_per_layer_mb=20.0,
+            worker_order=["a"], max_worker_layers=-1,
+        )
+
+
+def test_auto_policy_keeps_workers_out_when_the_head_holds_the_model(tmp_path):
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers, policy="auto")
+    head = _FakeHead()
+    sup = ClusterSupervisor(
+        cfg, head,
+        probe=_probe_factory({"100.1.1.1:50052": 8000.0}, local_free=8000.0),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
+    )
+    plan = sup.reconcile()
+    assert plan.device_order == ()
+    assert plan.layers_for(HEAD) == 26
+    assert head.restarts[-1] == []
+
+
+def test_auto_policy_splits_when_the_head_is_too_small(tmp_path):
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    # 3 MB model / 26 layers = ~0.115 MB per layer; a 1 MB head cannot hold it.
+    cfg = _cfg(tmp_path, workers, policy="auto", model_bytes=3_000_000)
+    head = _FakeHead()
+    sup = ClusterSupervisor(
+        cfg, head,
+        probe=_probe_factory({"100.1.1.1:50052": 8000.0}, local_free=1.0),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
+    )
+    plan = sup.reconcile()
+    assert plan.device_order == ("a",)
+    assert plan.layers_for("a") > 0
+    assert head.restarts[-1] == ["a"]
+
+
+def test_auto_policy_does_not_restart_when_the_split_is_unchanged(tmp_path):
+    # Regression: the head restarted every probe interval because live membership (the worker)
+    # was compared against the active split (empty). A live worker must not bounce a head-only head.
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers, policy="auto")
+    head = _FakeHead()
+    sup = ClusterSupervisor(
+        cfg, head,
+        probe=_probe_factory({"100.1.1.1:50052": 8000.0}),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
+    )
+    assert sup.reconcile() is not None
+    assert sup.reconcile() is None
+    assert len(head.restarts) == 1
+
+
+def test_supervisor_never_splits_under_never_policy(tmp_path):
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers, policy="never")
+    head = _FakeHead()
+    sup = ClusterSupervisor(
+        cfg, head,
+        probe=_probe_factory({"100.1.1.1:50052": 8000.0}),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
+    )
+    plan = sup.reconcile()
+    assert plan.device_order == ()
+    assert head.restarts[-1] == []
+
+
+def test_never_policy_does_not_fall_back_to_a_split(tmp_path):
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers, policy="never", model_bytes=3_000_000)
+    head = _FakeHead()
+    sup = ClusterSupervisor(
+        cfg, head,
+        probe=_probe_factory({"100.1.1.1:50052": 8000.0}, local_free=1.0),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
+    )
+    with pytest.raises(ValueError, match="can hold"):
+        sup.reconcile()
+    assert head.restarts == []
+
+
+def test_supervisor_drops_the_heads_own_rpc_endpoint(tmp_path):
+    workers = [WorkerEndpoint("self", "127.0.0.1", 50052),
+               WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers)
+    sup = ClusterSupervisor(
+        cfg, _FakeHead(),
+        probe=_probe_factory({"100.1.1.1:50052": 3000.0}),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
+    )
+    assert list(sup._states) == ["a"]
+    assert [w.name for w in cfg.workers] == ["a"]
+
+
+def test_supervisor_records_measured_rate_and_caps_the_next_split(tmp_path, monkeypatch):
+    monkeypatch.setattr("racon.cluster.supervisor.bytes_per_layer_mb", lambda *_: 20.0)
+    workers = [WorkerEndpoint("a", "100.1.1.1", 50052)]
+    cfg = _cfg(tmp_path, workers, policy="always")
+    cfg.max_worker_layers = 0  # let the measured rate decide
+    cfg.rpc_startup_timeout_s = 120.0
+    head = _FakeHead()
+    rates = tmp_path / "rates.json"
+    sup = ClusterSupervisor(
+        cfg, head,
+        probe=_probe_factory({"100.1.1.1:50052": 8000.0}),
+        reachable=lambda h, p: True,
+        latency=lambda h, p: 0.0,
+        rates_path=rates,
+    )
+    # 20 MiB over 20 s: 1 MiB/s, so 120 s * 0.8 at 20 MiB/layer fits 4 layers.
+    head.last_load = {"seconds": 20.0, "rpc_mb": 20.0, "tensors_transferred": 10}
+    plan = sup.reconcile()
+    assert plan is not None and plan.layers_for("a") > 0
+    assert rates.exists()
+    assert "100.1.1.1:50052" in rates.read_text(encoding="utf-8")
+
+    capped, active = sup.build_plan(workers)
+    assert capped.layers_for("a") <= 4
+    assert capped.layers_for("a") < plan.layers_for("a")
+    assert active == workers
+

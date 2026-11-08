@@ -89,6 +89,7 @@ def plan_layers(
     worker_order: Optional[List[str]] = None,
     memory_fraction: float = DEFAULT_MEMORY_FRACTION,
     min_worker_layers: int = DEFAULT_MIN_WORKER_LAYERS,
+    max_worker_layers: int = 0,
 ) -> Plan:
     """Split layers across workers and the head in proportion to usable memory.
 
@@ -96,14 +97,24 @@ def plan_layers(
     proportion to caps (so every measured worker gets a share, not just the first one), and the head
     is included as a device. Workers that end up with fewer than min_worker_layers are dropped and their
     layers return to the head. Planning fails if the head cannot hold what remains.
+
+    max_worker_layers caps each worker's share. It exists because every offloaded layer must be
+    transferred over the link before the head becomes healthy: a slow link plus a large share
+    misses the startup timeout and falls back to head-only. Capping the first load keeps a
+    verified worker in the plan.
     """
     if total_layers <= 0:
         raise ValueError("total_layers must be positive")
     if bytes_per_layer_mb <= 0:
         raise ValueError("bytes_per_layer_mb must be positive")
+    if max_worker_layers < 0:
+        raise ValueError("max_worker_layers must be 0 (no cap) or positive")
 
     order = list(worker_order) if worker_order is not None else sorted(worker_free_mb)
     caps = {d: _capacity(worker_free_mb[d], memory_fraction, bytes_per_layer_mb, total_layers) for d in order}
+    if max_worker_layers > 0:
+        caps = {d: min(c, max_worker_layers) for d, c in caps.items()}
+        min_worker_layers = min(min_worker_layers, max_worker_layers)
     head_cap = _capacity(head_free_mb, memory_fraction, bytes_per_layer_mb, total_layers)
     caps[HEAD] = head_cap
 

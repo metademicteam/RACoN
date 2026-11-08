@@ -1,0 +1,1002 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RACoN Admin — Worker Network</title>
+<style>
+  :root {
+    --bg: #080b10;
+    --panel: #0e131b;
+    --panel-2: #131a24;
+    --line: #1f2937;
+    --text: #d7e0ea;
+    --muted: #8192a6;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --blue: #60a5fa;
+    --violet: #a78bfa;
+    --cyan: #22d3ee;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 10% -10%, #122033 0%, var(--bg) 55%);
+    color: var(--text);
+    font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh;
+  }
+  .hidden { display: none !important; }
+  a { color: var(--blue); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+
+  /* Login */
+  .login {
+    min-height: 100vh; display: grid; place-items: center; padding: 24px;
+  }
+  .login-card {
+    width: min(460px, 100%);
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    border: 1px solid var(--line); border-radius: 18px; padding: 28px;
+    box-shadow: 0 24px 80px rgba(0,0,0,.5);
+  }
+  .login-card h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: .2px; }
+  .login-card p { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+  .login-card label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+  .login-card input {
+    width: 100%; padding: 11px 13px; border-radius: 10px; border: 1px solid var(--line);
+    background: #070a0f; color: var(--text); outline: none; margin-bottom: 12px;
+  }
+  .login-card input:focus { border-color: var(--blue); }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    padding: 9px 14px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); cursor: pointer; font-weight: 600;
+    font-size: 13px; transition: .15s ease;
+  }
+  .btn:hover { border-color: #3b4a5f; transform: translateY(-1px); }
+  .btn.primary { background: linear-gradient(180deg, #1d4ed8, #1e40af); border-color: #2563eb; }
+  .btn.good { background: #052e22; border-color: #065f46; color: var(--green); }
+  .btn.bad { background: #2a1114; border-color: #7f1d1d; color: var(--red); }
+  .btn.ghost { background: transparent; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+
+  /* Layout */
+  header.top {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    padding: 14px 22px; border-bottom: 1px solid var(--line);
+    background: rgba(8,11,16,.86); backdrop-filter: blur(12px);
+  }
+  .brand { display: flex; align-items: center; gap: 11px; margin-right: 6px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #1d4ed8, #0891b2); font-weight: 800; font-size: 14px;
+    box-shadow: 0 0 24px rgba(37,99,235,.45);
+  }
+  .brand b { font-size: 16px; letter-spacing: .3px; }
+  .brand span { display: block; font-size: 11px; color: var(--muted); font-weight: 500; }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot-good { background: var(--green); box-shadow: 0 0 10px var(--green); }
+  .dot-bad { background: var(--red); box-shadow: 0 0 10px var(--red); }
+  .dot-warn { background: var(--amber); box-shadow: 0 0 10px var(--amber); }
+  .top-meta { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-left: auto; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px; border-radius: 999px;
+    border: 1px solid var(--line); background: #0b1018; font-size: 11px; color: var(--muted);
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+
+  nav.tabs {
+    display: flex; gap: 6px; padding: 12px 22px 0; flex-wrap: wrap;
+  }
+  nav.tabs button {
+    border: 1px solid transparent; background: transparent; color: var(--muted);
+    padding: 9px 14px; border-radius: 9px 9px 0 0; cursor: pointer; font-weight: 600; font-size: 13px;
+  }
+  nav.tabs button:hover { color: var(--text); }
+  nav.tabs button.active { color: var(--text); background: var(--panel); border-color: var(--line); border-bottom-color: var(--panel); }
+
+  main { padding: 0 22px 40px; }
+  .tabpane { display: none; }
+  .tabpane.active { display: block; animation: fade .18s ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+  .grid { display: grid; gap: 14px; }
+  .grid.cols-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .grid.cols-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .grid.cols-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  @media (max-width: 1000px) { .grid.cols-4, .grid.cols-3, .grid.cols-2 { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 640px) { .grid.cols-4, .grid.cols-3, .grid.cols-2 { grid-template-columns: 1fr; } }
+
+  .card {
+    background: linear-gradient(180deg, rgba(19,26,36,.92), rgba(14,19,27,.92));
+    border: 1px solid var(--line); border-radius: 14px; padding: 16px;
+    box-shadow: 0 12px 36px rgba(0,0,0,.22);
+  }
+  .card h2 { margin: 0 0 12px; font-size: 13px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+  .metric .value { font-size: 30px; font-weight: 800; letter-spacing: -.5px; line-height: 1.1; }
+  .metric .label { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .metric .sub { color: var(--muted); font-size: 11px; margin-top: 8px; }
+
+  .worker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 14px; }
+  .worker {
+    position: relative; background: linear-gradient(180deg, #111823, #0c1119);
+    border: 1px solid var(--line); border-radius: 14px; padding: 15px; overflow: hidden;
+  }
+  .worker::before {
+    content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--blue), transparent); opacity: .6;
+  }
+  .worker.online::before { background: linear-gradient(90deg, transparent, var(--green), transparent); }
+  .worker.offline { opacity: .72; }
+  .worker-head { display: flex; align-items: flex-start; gap: 10px; }
+  .worker-head h3 { margin: 0; font-size: 14px; line-height: 1.25; }
+  .worker-head .id { color: var(--muted); font-size: 10.5px; margin-top: 3px; word-break: break-all; }
+  .badge { font-size: 10px; font-weight: 700; padding: 3px 7px; border-radius: 999px; text-transform: uppercase; letter-spacing: .4px; }
+  .b-online { background: #052e22; color: var(--green); border: 1px solid #065f46; }
+  .b-offline { background: #221a10; color: var(--amber); border: 1px solid #78350f; }
+  .b-pending { background: #2a230b; color: var(--amber); border: 1px solid #713f12; }
+  .b-revoked { background: #2a1114; color: var(--red); border: 1px solid #7f1d1d; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 5px 10px; margin-top: 12px; font-size: 12px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { color: var(--text); word-break: break-word; }
+  .bar { height: 6px; border-radius: 999px; background: #1b2431; overflow: hidden; margin-top: 5px; }
+  .bar > i { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--green), var(--cyan)); }
+  .worker-actions { display: flex; gap: 7px; margin-top: 13px; }
+  .worker-actions .btn { padding: 5px 9px; font-size: 11px; }
+
+  .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .toolbar input, .toolbar select {
+    padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: #070a0f; color: var(--text);
+  }
+  .toolbar .grow { flex: 1; min-width: 160px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 8px 9px; border-bottom: 1px solid #17202c; vertical-align: top; }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .4px; font-weight: 600; }
+  tr:hover td { background: rgba(96,165,250,.035); }
+  .arrow { color: var(--muted); margin: 0 5px; }
+  .src { color: var(--cyan); }
+  .dst { color: var(--violet); }
+  .pill { font-size: 10px; padding: 2px 7px; border-radius: 999px; background: #111a26; border: 1px solid var(--line); color: var(--muted); }
+  .pill.green { color: var(--green); border-color: #065f46; background: #052e22; }
+  .pill.red { color: var(--red); border-color: #7f1d1d; background: #2a1114; }
+  .pill.amber { color: var(--amber); border-color: #713f12; background: #2a230b; }
+  .muted { color: var(--muted); }
+  .empty { padding: 26px 10px; text-align: center; color: var(--muted); }
+  .scroll { max-height: 460px; overflow: auto; }
+  .scroll::-webkit-scrollbar { width: 9px; height: 9px; }
+  .scroll::-webkit-scrollbar-thumb { background: #243041; border-radius: 9px; }
+
+  .job { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 10px; overflow: hidden; background: #0b1018; }
+  .job summary { cursor: pointer; padding: 12px 14px; display: flex; align-items: center; gap: 12px; list-style: none; flex-wrap: wrap; }
+  .job summary::-webkit-details-marker { display: none; }
+  .job summary:hover { background: #0f1621; }
+  .job .title { font-weight: 700; flex: 1; min-width: 180px; }
+  .job .meta { color: var(--muted); font-size: 11px; }
+  .job .body { padding: 0 14px 14px; border-top: 1px solid #17202c; }
+  .job .plan { margin: 10px 0; padding: 10px; background: #070a0f; border-radius: 8px; font-size: 12px; }
+
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .form-grid .full { grid-column: 1 / -1; }
+  .form-grid label { display: block; color: var(--muted); font-size: 11px; margin-bottom: 5px; }
+  .form-grid input, .form-grid select, .form-grid textarea {
+    width: 100%; padding: 9px 10px; border-radius: 8px; border: 1px solid var(--line);
+    background: #070a0f; color: var(--text); font: inherit;
+  }
+  .toast {
+    position: fixed; right: 18px; bottom: 18px; z-index: 50; max-width: 380px;
+    background: #0f1621; border: 1px solid var(--line); border-left: 3px solid var(--blue);
+    padding: 11px 14px; border-radius: 10px; font-size: 12.5px; box-shadow: 0 18px 50px rgba(0,0,0,.5);
+    opacity: 0; transform: translateY(8px); transition: .2s ease; pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: none; }
+  .toast.error { border-left-color: var(--red); }
+  .toast.ok { border-left-color: var(--green); }
+  .pulse { animation: pulse 1s ease; }
+  @keyframes pulse { 0% { background: rgba(52,211,153,.18); } 100% { background: transparent; } }
+  .small { font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div id="login" class="login">
+  <div class="login-card">
+    <h1>RACoN Admin</h1>
+    <p>Operator console for the worker network. Enter the administrator token (the <code>AUTH_TOKEN</code> value in the server's <code>.env</code>). Client tokens are rejected here.</p>
+    <label for="tokenInput">API token</label>
+    <input id="tokenInput" type="password" placeholder="X-RACON-TOKEN" autocomplete="off" />
+    <button class="btn primary" id="loginBtn" style="width:100%">Connect to server</button>
+    <p id="loginError" class="small" style="color:var(--red);margin:10px 0 0"></p>
+  </div>
+</div>
+
+<div id="app" class="hidden">
+  <header class="top">
+    <div class="brand">
+      <div class="logo">R</div>
+      <div><b>RACoN Admin</b><span>Worker network control plane</span></div>
+    </div>
+    <div class="top-meta">
+      <span class="chip"><span id="serverDot" class="status-dot dot-warn"></span><b id="serverState">connecting…</b></span>
+      <span class="chip">version <b id="serverVersion">—</b></span>
+      <span class="chip">db <b id="dbBackend">—</b></span>
+      <span class="chip">uptime <b id="uptime">—</b></span>
+      <button class="btn ghost" id="pauseBtn">Pause live</button>
+      <button class="btn ghost" id="logoutBtn">Lock</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="workers">Workers</button>
+    <button data-tab="keys">API keys</button>
+    <button data-tab="routing">Live routing</button>
+    <button data-tab="scheduler">Agentic scheduler</button>
+    <button data-tab="downloads">Downloads &amp; invites</button>
+    <button data-tab="diagnostics">Diagnostics</button>
+  </nav>
+
+  <main>
+    <section class="tabpane active" id="tab-overview">
+      <div class="grid cols-4" style="margin:14px 0">
+        <div class="card metric"><div class="value" id="mOnline">—</div><div class="label">Workers online</div><div class="sub" id="mNodesSub">—</div></div>
+        <div class="card metric"><div class="value" id="mApproved">—</div><div class="label">Approved nodes</div><div class="sub" id="mPending">— pending</div></div>
+        <div class="card metric"><div class="value" id="mJobsRunning">—</div><div class="label">Jobs running</div><div class="sub" id="mJobsSub">—</div></div>
+        <div class="card metric"><div class="value" id="mLastEvent">—</div><div class="label">Last routing event</div><div class="sub" id="mLastEventSub">—</div></div>
+      </div>
+      <div class="grid cols-2">
+        <div class="card">
+          <h2>Server</h2>
+          <div class="kv" id="serverInfo"></div>
+        </div>
+        <div class="card">
+          <h2>Network topology</h2>
+          <div id="topology" class="muted small">Waiting for nodes…</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <h2>Recent routing (node → node)</h2>
+        <div class="scroll"><table><thead><tr><th>Time</th><th>Flow</th><th>Event</th><th>State</th><th>Message</th></tr></thead><tbody id="overviewEvents"></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="tabpane" id="tab-workers">
+      <div class="toolbar" style="margin-top:14px">
+        <input id="workerFilter" class="grow" placeholder="Filter by name, id, OS, GPU, runtime…" />
+        <select id="workerState"><option value="">All states</option><option value="online">Online</option><option value="offline">Offline</option><option value="pending">Pending</option><option value="revoked">Revoked</option></select>
+        <button class="btn" id="refreshWorkers">Refresh</button>
+      </div>
+      <div id="workers" class="worker-grid"></div>
+    </section>
+
+    <section class="tabpane" id="tab-keys">
+      <div class="grid cols-2" style="margin:14px 0">
+        <div class="card">
+          <h2>Create inference key</h2>
+          <div class="form-grid">
+            <label>Name <input id="keyName" value="agent" maxlength="128" /></label>
+            <label>Rate limit / min <input id="keyLimit" type="number" min="1" max="10000" value="60" /></label>
+          </div>
+          <button class="btn primary" id="createKey">Create key</button>
+          <div id="keyResult" class="small" style="margin-top:10px"></div>
+          <p class="small muted">Use the key as <code>Authorization: Bearer rk_…</code> or <code>x-api-key</code>
+            against <code>/v1</code>. The plaintext is shown once and is never stored.</p>
+        </div>
+        <div class="card">
+          <h2>Issued keys</h2>
+          <div id="keysList" class="muted small">Open this tab to load keys.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tabpane" id="tab-routing">
+      <div class="toolbar" style="margin-top:14px">
+        <input id="eventFilter" class="grow" placeholder="Filter source, target, task, message…" />
+        <select id="eventType">
+          <option value="">All events</option>
+          <option value="enroll">enroll</option>
+          <option value="heartbeat">heartbeat</option>
+          <option value="task_dispatched">task_dispatched</option>
+          <option value="task_claimed">task_claimed</option>
+          <option value="task_reported">task_reported</option>
+          <option value="job_submitted">job_submitted</option>
+          <option value="job_task_assigned">job_task_assigned</option>
+          <option value="job_task_completed">job_task_completed</option>
+          <option value="job_task_failed">job_task_failed</option>
+          <option value="worker_approved">worker_approved</option>
+          <option value="worker_revoked">worker_revoked</option>
+        </select>
+        <span class="chip">buffer <b id="eventCount">0</b></span>
+        <button class="btn ghost" id="clearEvents">Clear view</button>
+      </div>
+      <div class="card">
+        <div class="scroll" style="max-height:68vh">
+          <table>
+            <thead><tr><th>Time</th><th>Flow</th><th>Event</th><th>Task / Job</th><th>State</th><th>Detail</th></tr></thead>
+            <tbody id="eventRows"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section class="tabpane" id="tab-scheduler">
+      <div class="grid cols-2" style="margin:14px 0">
+        <div class="card">
+          <h2>Dispatch a test task</h2>
+          <div class="form-grid">
+            <div class="full"><label>Worker</label><select id="dispatchNode"></select></div>
+            <div><label>Model</label><input id="dispatchModel" value="qwen2.5:0.5b" /></div>
+            <div><label>Max tokens</label><input id="dispatchTokens" type="number" value="128" min="1" max="4096" /></div>
+            <div class="full"><label>Prompt</label><textarea id="dispatchPrompt" rows="3">Reply with exactly: RACON worker link is live.</textarea></div>
+          </div>
+          <button class="btn primary" id="dispatchBtn" style="margin-top:10px">Dispatch to worker</button>
+        </div>
+        <div class="card">
+          <h2>Scheduler summary</h2>
+          <div class="kv" id="schedulerSummary"></div>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Orchestration jobs</h2>
+        <div id="jobs"></div>
+      </div>
+    </section>
+
+    <section class="tabpane" id="tab-downloads">
+      <div class="grid cols-2" style="margin:14px 0">
+        <div class="card">
+          <h2>Model downloads</h2>
+          <div id="downloads" class="muted small">No download activity.</div>
+        </div>
+        <div class="card">
+          <h2>Worker invites</h2>
+          <div class="form-grid">
+            <div><label>Max uses</label><input id="inviteUses" type="number" value="5" min="1" max="1000" /></div>
+            <div><label>Expiry (hours)</label><input id="inviteHours" type="number" value="24" min="1" max="8760" /></div>
+          </div>
+          <button class="btn primary" id="createInvite" style="margin-top:10px">Create invite</button>
+          <div id="inviteResult" class="small" style="margin-top:10px"></div>
+          <div id="invites" class="small" style="margin-top:12px"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tabpane" id="tab-diagnostics">
+      <div class="grid cols-2" style="margin:14px 0">
+        <div class="card">
+          <h2>System diagnostics</h2>
+          <button class="btn primary" id="runDiagnostics">Run diagnostics</button>
+          <div id="diagnostics" class="small" style="margin-top:12px">Not run yet.</div>
+        </div>
+        <div class="card">
+          <h2>Smart router preview</h2>
+          <div class="form-grid">
+            <div class="full"><label>Prompt</label><textarea id="routePrompt" rows="3">Write a Python function that reverses a list.</textarea></div>
+            <div><label>Requested model</label><input id="routeModel" value="auto" /></div>
+            <div><label>&nbsp;</label><button class="btn" id="routeBtn">Preview route</button></div>
+          </div>
+          <div id="routeResult" class="small" style="margin-top:10px">The same classifier used by model="auto" on /v1/chat/completions.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const state = {
+    token: "",
+    timer: null,
+    paused: false,
+    events: [],
+    lastEventId: 0,
+    nodes: [],
+    overview: null,
+    scheduler: null,
+    keys: [],
+    activeTab: "overview",
+  };
+
+  function esc(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function fmtMs(ms) {
+    if (ms == null) return "—";
+    const n = Number(ms);
+    if (!isFinite(n)) return "—";
+    if (n < 1000) return Math.round(n) + " ms";
+    if (n < 60000) return (n / 1000).toFixed(1) + " s";
+    return (n / 60000).toFixed(1) + " min";
+  }
+  function fmtTime(value) {
+    if (!value) return "—";
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? String(value) : d.toLocaleTimeString();
+  }
+  function fmtAge(seconds) {
+    if (seconds == null) return "—";
+    const s = Number(seconds);
+    if (!isFinite(s)) return "—";
+    if (s < 60) return s.toFixed(0) + "s ago";
+    if (s < 3600) return (s / 60).toFixed(1) + "m ago";
+    return (s / 3600).toFixed(1) + "h ago";
+  }
+  function bytes(n) {
+    if (n == null) return "—";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let v = Number(n), i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return v.toFixed(v >= 10 || i === 0 ? 0 : 1) + " " + units[i];
+  }
+  function statePill(value) {
+    const v = String(value || "").toLowerCase();
+    const cls = (v === "completed" || v === "approved" || v === "ok" || v === "running" || v === "available" || v === "active")
+      ? "green" : (v === "failed" || v === "revoked" || v === "error" || v === "cancelled") ? "red"
+      : (v === "pending" || v === "pulling" || v === "downloading") ? "amber" : "";
+    return `<span class="pill ${cls}">${esc(value || "—")}</span>`;
+  }
+  function toast(message, kind) {
+    const el = $("toast");
+    el.textContent = message;
+    el.className = "toast show " + (kind || "");
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => { el.className = "toast " + (kind || ""); }, 3200);
+  }
+
+  async function api(path) {
+    const res = await fetch(path, {
+      headers: { "X-RACON-TOKEN": state.token, "Authorization": "Bearer " + state.token },
+      cache: "no-store",
+    });
+    if (res.status === 401) {
+      state.token = "";
+      sessionStorage.removeItem("racon_admin_token");
+      showLogin("Token rejected. Enter the server API token again.");
+      throw new Error("unauthorized");
+    }
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { const body = await res.json(); detail = body?.detail || body?.error?.message || detail; } catch (_) {}
+      throw new Error(detail);
+    }
+    return res.json();
+  }
+
+  function showLogin(error) {
+    stopPolling();
+    $("app").classList.add("hidden");
+    $("login").classList.remove("hidden");
+    $("loginError").textContent = error || "";
+    setTimeout(() => $("tokenInput").focus(), 50);
+  }
+  function showApp() {
+    $("login").classList.add("hidden");
+    $("app").classList.remove("hidden");
+    startPolling();
+  }
+
+  function startPolling() {
+    stopPolling();
+    refreshAll(true);
+    state.timer = setInterval(() => { if (!state.paused) refreshAll(false); }, 4000);
+  }
+  function stopPolling() {
+    if (state.timer) clearInterval(state.timer);
+    state.timer = null;
+  }
+
+  async function refreshAll(initial) {
+    try {
+      const [overview, nodes, scheduler] = await Promise.all([
+        api("/api/v1/admin/overview"),
+        api("/api/v1/admin/nodes"),
+        api("/api/v1/admin/scheduler?limit=40"),
+      ]);
+      state.overview = overview;
+      state.nodes = nodes;
+      state.scheduler = scheduler;
+      $("serverDot").className = "status-dot dot-good";
+      $("serverState").textContent = "online";
+      renderOverview();
+      renderWorkers();
+      renderScheduler();
+      await refreshEvents(initial);
+      await refreshDownloads();
+    } catch (err) {
+      if (String(err.message) === "unauthorized") return;
+      $("serverDot").className = "status-dot dot-bad";
+      $("serverState").textContent = "unreachable";
+      if (initial) toast(err.message, "error");
+    }
+  }
+
+  async function refreshEvents(initial) {
+    const after = initial ? 0 : state.lastEventId;
+    const limit = initial ? 250 : 250;
+    const data = await api(`/api/v1/admin/events?limit=${limit}&after_id=${after}`);
+    const incoming = data.events || [];
+    if (initial || after === 0) {
+      state.events = incoming.slice(-500);
+    } else if (incoming.length) {
+      const seen = new Set(state.events.map((e) => e.id));
+      for (const ev of incoming) if (!seen.has(ev.id)) state.events.push(ev);
+      state.events = state.events.slice(-800);
+    }
+    if (state.events.length) state.lastEventId = state.events[state.events.length - 1].id;
+    renderEvents();
+    renderOverviewEvents();
+    renderTopology();
+  }
+
+  async function refreshDownloads() {
+    try {
+      const data = await api("/api/v1/admin/downloads");
+      renderDownloads(data.downloads || {});
+    } catch (_) {}
+  }
+
+  function nodeName(id) {
+    if (!id) return "—";
+    if (id === "server" || id === "coordinator" || id === "admin") return id;
+    const node = state.nodes.find((n) => n.id === id);
+    return node ? node.name : id;
+  }
+
+  function renderOverview() {
+    const o = state.overview || {};
+    const server = o.server || {};
+    const nodes = o.nodes || {};
+    const scheduler = o.scheduler || {};
+    $("serverVersion").textContent = server.version || "—";
+    $("dbBackend").textContent = (server.database && server.database.backend) || "—";
+    $("uptime").textContent = fmtMs((server.uptime_seconds || 0) * 1000);
+    $("mOnline").textContent = `${nodes.online || 0} / ${nodes.total || 0}`;
+    $("mNodesSub").textContent = `${nodes.offline || 0} offline`;
+    $("mApproved").textContent = nodes.approved || 0;
+    $("mPending").textContent = `${nodes.pending || 0} pending`;
+    $("mJobsRunning").textContent = scheduler.jobs_running || 0;
+    $("mJobsSub").textContent = `${scheduler.jobs_completed || 0} completed · ${scheduler.jobs_failed || 0} failed`;
+    const last = (o.routing || {}).last_event;
+    $("mLastEvent").textContent = last ? fmtTime(last.timestamp) : "—";
+    $("mLastEventSub").textContent = last ? `${last.event_type} · ${last.source} → ${last.target}` : "no events yet";
+
+    const db = server.database || {};
+    const rows = [
+      ["Coordinator key", server.coordinator_public_key ? server.coordinator_public_key.slice(0, 20) + "…" : "—"],
+      ["Database", db.backend === "postgresql" ? `PostgreSQL${db.host ? " @ " + db.host : ""}` : (db.backend || "—")],
+      ["Auto-approve", server.auto_approve ? "enabled" : "disabled"],
+      ["Auto-join code", server.auto_join_enabled ? "configured" : "disabled"],
+      ["Started", server.started_at ? new Date(server.started_at).toLocaleString() : "—"],
+    ];
+    $("serverInfo").innerHTML = rows.map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join("");
+  }
+
+  function renderTopology() {
+    const nodes = state.nodes || [];
+    if (!nodes.length) { $("topology").textContent = "Waiting for nodes…"; return; }
+    const recent = state.events.slice(-40);
+    const activity = new Set();
+    recent.forEach((ev) => { activity.add(ev.source); activity.add(ev.target); });
+    const items = nodes.map((n) => {
+      const active = activity.has(n.id);
+      const cls = n.online ? "b-online" : n.trust_state === "pending" ? "b-pending" : "b-offline";
+      return `<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #17202c">
+        <span class="status-dot ${n.online ? "dot-good" : "dot-warn"}"></span>
+        <b style="font-size:12px">${esc(n.name)}</b>
+        <span class="badge ${cls}">${esc(n.trust_state)}</span>
+        ${active ? '<span class="pill green">active</span>' : ""}
+        <span class="muted" style="margin-left:auto;font-size:10.5px">${esc(n.id)}</span>
+      </div>`;
+    }).join("");
+    $("topology").innerHTML = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span class="status-dot dot-good"></span><b>RACoN server</b>
+        <span class="muted">${nodes.length} node(s) attached</span>
+      </div>${items}`;
+  }
+
+  function renderOverviewEvents() {
+    const rows = state.events.slice(-8).reverse();
+    $("overviewEvents").innerHTML = rows.length ? rows.map((ev) => `
+      <tr>
+        <td class="muted mono small">${esc(fmtTime(ev.timestamp))}</td>
+        <td><span class="src">${esc(nodeName(ev.source))}</span><span class="arrow">→</span><span class="dst">${esc(nodeName(ev.target))}</span></td>
+        <td>${esc(ev.event_type)}</td>
+        <td>${statePill(ev.state || "")}</td>
+        <td class="muted">${esc(ev.message)}</td>
+      </tr>`).join("") : `<tr><td colspan="5" class="empty">No routing events yet. Enroll a worker to see traffic.</td></tr>`;
+  }
+
+  function renderWorkers() {
+    const filter = ($("workerFilter").value || "").toLowerCase();
+    const wanted = $("workerState").value;
+    const nodes = state.nodes.filter((n) => {
+      if (wanted === "online" && !n.online) return false;
+      if (wanted === "offline" && n.online) return false;
+      if (wanted && wanted !== "online" && wanted !== "offline" && n.trust_state !== wanted) return false;
+      if (!filter) return true;
+      const hay = [n.id, n.name, n.os, n.cpu && n.cpu.name, n.gpu && n.gpu.name,
+        ...(n.runtimes || []), n.rpc_endpoint].join(" ").toLowerCase();
+      return hay.includes(filter);
+    });
+    if (!nodes.length) {
+      $("workers").innerHTML = `<div class="card empty" style="grid-column:1/-1">No workers match. Start an agent with <code>RACON_COORDINATOR_URL</code> pointing at this server.</div>`;
+      return;
+    }
+    $("workers").innerHTML = nodes.map((n) => {
+      const total = Number(n.ram_total_mb || 0);
+      const avail = Number(n.ram_available_mb || 0);
+      const usedPct = total > 0 ? Math.max(0, Math.min(100, ((total - avail) / total) * 100)) : 0;
+      const badge = n.online ? "b-online" : n.trust_state === "pending" ? "b-pending" : n.trust_state === "revoked" ? "b-revoked" : "b-offline";
+      const gpu = n.gpu && n.gpu.name ? n.gpu.name + (n.gpu.vram_total_mb ? ` · ${Math.round(n.gpu.vram_total_mb)} MB` : "") : "none";
+      return `<div class="worker ${n.online ? "online" : "offline"}">
+        <div class="worker-head">
+          <div style="flex:1">
+            <h3>${esc(n.name)}</h3>
+            <div class="id mono">${esc(n.id)}</div>
+          </div>
+          <span class="badge ${badge}">${esc(n.online ? "online" : n.trust_state)}</span>
+        </div>
+        <div class="kv">
+          <div class="k">Host</div><div class="v mono">${esc(n.host || "—")}</div>
+          <div class="k">OS</div><div class="v">${esc(n.os || "—")}</div>
+          <div class="k">CPU</div><div class="v">${esc((n.cpu && n.cpu.name) || "—")} · ${esc((n.cpu && n.cpu.cores) || "?")} cores · ${esc((n.cpu && n.cpu.utilization_pct) || 0)}%</div>
+          <div class="k">RAM</div><div class="v">${bytes((total - avail) * 1024 * 1024)} used / ${bytes(total * 1024 * 1024)}</div>
+          <div class="k">GPU</div><div class="v">${esc(gpu)}</div>
+          <div class="k">Runtimes</div><div class="v">${esc((n.runtimes || []).join(", ") || "—")}</div>
+          <div class="k">RPC</div><div class="v mono">${esc(n.rpc_endpoint || "—")}</div>
+          <div class="k">Heartbeat</div><div class="v">${n.heartbeat_age_s != null ? esc(fmtAge(n.heartbeat_age_s)) : "—"}</div>
+          <div class="k">Tasks</div><div class="v">${esc((n.active_tasks || []).length)} active</div>
+        </div>
+        <div class="bar"><i style="width:${usedPct.toFixed(0)}%"></i></div>
+        <div class="worker-actions">
+          ${n.trust_state === "pending" ? `<button class="btn good" data-approve="${esc(n.id)}">Approve</button>` : ""}
+          ${n.trust_state !== "revoked" && !n.is_local ? `<button class="btn bad" data-revoke="${esc(n.id)}">Revoke</button>` : ""}
+        </div>
+      </div>`;
+    }).join("");
+  }
+
+  function renderEvents() {
+    const filter = ($("eventFilter").value || "").toLowerCase();
+    const type = $("eventType").value;
+    const rows = state.events.filter((ev) => {
+      if (type && ev.event_type !== type) return false;
+      if (!filter) return true;
+      return [ev.source, ev.target, ev.event_type, ev.task_id, ev.job_id, ev.message, JSON.stringify(ev.detail || {})]
+        .join(" ").toLowerCase().includes(filter);
+    });
+    $("eventCount").textContent = String(rows.length);
+    $("eventRows").innerHTML = rows.length ? rows.slice(-400).reverse().map((ev) => `
+      <tr>
+        <td class="muted mono small">${esc(fmtTime(ev.timestamp))}</td>
+        <td><span class="src">${esc(nodeName(ev.source))}</span><span class="arrow">→</span><span class="dst">${esc(nodeName(ev.target))}</span></td>
+        <td><span class="mono">${esc(ev.event_type)}</span></td>
+        <td class="mono small">${esc(ev.task_id || ev.job_id || "—")}</td>
+        <td>${statePill(ev.state || "")}</td>
+        <td class="muted small">${esc(ev.message)}</td>
+      </tr>`).join("") : `<tr><td colspan="6" class="empty">No matching events.</td></tr>`;
+  }
+
+  function renderScheduler() {
+    const data = state.scheduler || {};
+    const jobs = data.jobs || [];
+    const running = jobs.filter((j) => ["queued", "planning", "running", "synthesizing"].includes(j.status)).length;
+    const completed = jobs.filter((j) => j.status === "completed").length;
+    const failed = jobs.filter((j) => ["failed", "cancelled"].includes(j.status)).length;
+    $("schedulerSummary").innerHTML = [
+      ["Jobs shown", jobs.length],
+      ["Running", running],
+      ["Completed", completed],
+      ["Failed / cancelled", failed],
+    ].map(([k, v]) => `<div class="k">${esc(k)}</div><div class="v">${esc(v)}</div>`).join("");
+
+    const online = state.nodes.filter((n) => n.online && n.trust_state === "approved" && !n.is_local);
+    const current = $("dispatchNode").value;
+    $("dispatchNode").innerHTML = online.length
+      ? online.map((n) => `<option value="${esc(n.id)}">${esc(n.name)} (${esc(n.id)})</option>`).join("")
+      : `<option value="">No online approved workers</option>`;
+    if (current) $("dispatchNode").value = current;
+
+    $("jobs").innerHTML = jobs.length ? jobs.map((job) => {
+      const tasks = job.tasks || [];
+      const taskRows = tasks.map((t) => `
+        <tr>
+          <td class="mono">${esc(t.task_id)}</td>
+          <td>${esc(t.title || "")}</td>
+          <td>${statePill(t.state)}</td>
+          <td class="mono small">${esc(t.worker_id || "—")}</td>
+          <td>${esc(t.duration_ms != null ? fmtMs(t.duration_ms) : "—")}</td>
+          <td class="muted small">${esc(t.error || t.output || "")}</td>
+        </tr>`).join("");
+      return `<details class="job">
+        <summary>
+          <span class="title">${esc(job.name || job.id)}</span>
+          ${statePill(job.status)}
+          <span class="meta">${esc(job.execution_mode || "—")} · ${esc(job.planner_mode || "—")} · ${esc(job.tasks_completed || 0)}/${esc(job.tasks_total || 0)} tasks</span>
+          <span class="meta">${esc(fmtMs(job.duration_ms))}</span>
+        </summary>
+        <div class="body">
+          <div class="plan">${esc(job.prompt || "")}</div>
+          <div class="small muted" style="margin-bottom:8px">Job ${esc(job.id)} · model ${esc(job.model_name || "—")} · ${esc(job.created_at || "")}</div>
+          ${taskRows ? `<table><thead><tr><th>Task</th><th>Title</th><th>State</th><th>Worker</th><th>Duration</th><th>Result / error</th></tr></thead><tbody>${taskRows}</tbody></table>` : `<div class="muted small">No tasks recorded.</div>`}
+          ${job.result ? `<div class="plan" style="margin-top:10px"><b>Result</b><br>${esc(job.result)}</div>` : ""}
+          ${job.error ? `<div class="plan" style="margin-top:10px;color:var(--red)"><b>Error</b><br>${esc(job.error)}</div>` : ""}
+        </div>
+      </details>`;
+    }).join("") : `<div class="empty">No orchestration jobs yet. Submit one from the desktop app's Task Center.</div>`;
+  }
+
+  function renderDownloads(downloads) {
+    const entries = Object.entries(downloads || {});
+    if (!entries.length) { $("downloads").textContent = "No download activity."; return; }
+    $("downloads").innerHTML = entries.map(([id, info]) => {
+      const pct = Number(info.percentage || 0);
+      const cls = info.status === "failed" ? "red" : info.status === "completed" ? "green" : "amber";
+      return `<div style="margin-bottom:12px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <b class="mono" style="font-size:12px">${esc(id)}</b>${statePill(info.status)}
+          <span class="muted" style="margin-left:auto">${esc(pct.toFixed(1))}%</span>
+        </div>
+        <div class="bar"><i style="width:${Math.max(0, Math.min(100, pct)).toFixed(1)}%"></i></div>
+        <div class="muted small" style="margin-top:4px">${esc(info.message || "")}</div>
+      </div>`;
+    }).join("");
+  }
+
+  async function loadDiagnostics() {
+    const target = $("diagnostics");
+    target.textContent = "Running diagnostics…";
+    try {
+      const data = await api("/api/v1/admin/diagnostics");
+      const rows = (data.checks || []).map((check) => {
+        const cls = check.status === "ok" ? "green" : check.status === "warn" ? "amber" : "red";
+        return `<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid #17202c">
+          <span class="pill ${cls}">${esc(check.status)}</span>
+          <b style="min-width:150px">${esc(check.name)}</b>
+          <span class="muted">${esc(check.detail)}${check.hint ? `<br><span style="opacity:.8">${esc(check.hint)}</span>` : ""}</span>
+        </div>`;
+      });
+      target.innerHTML = `<div style="margin-bottom:8px">Overall: ${statePill(data.status)}</div>` + rows.join("");
+    } catch (err) {
+      target.textContent = err.message;
+    }
+  }
+
+  async function previewRoute() {
+    const target = $("routeResult");
+    target.textContent = "Classifying request…";
+    try {
+      const data = await fetch("/api/v1/scheduler/route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-RACON-TOKEN": state.token, "Authorization": "Bearer " + state.token },
+        body: JSON.stringify({
+          prompt: $("routePrompt").value.trim(),
+          model: $("routeModel").value.trim() || "auto",
+        }),
+      }).then(async (res) => {
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || body?.error?.message || res.statusText);
+        return body;
+      });
+      const cl = data.classification || {};
+      const candidates = (data.candidates || []).slice(0, 6).map((candidate) =>
+        `<div style="padding:3px 0"><b>${esc(candidate.name)}</b> · score ${esc(candidate.score)}<span class="muted"> · ${esc((candidate.capabilities || []).join(", "))}</span></div>`
+      ).join("");
+      target.innerHTML = `
+        <div>Selected: <b>${esc(data.selected_model || "—")}</b></div>
+        <div class="muted">${esc(data.reason || "")}</div>
+        <div class="muted" style="margin-top:4px">Category ${esc(cl.category)} · complexity ${esc(cl.complexity)} · tools ${cl.needs_tools ? "required" : "not required"} · media ${cl.has_media_inputs ? "present" : "none"}</div>
+        <div style="margin-top:8px">${candidates}</div>`;
+    } catch (err) {
+      target.textContent = err.message;
+    }
+  }
+
+  async function loadInvites() {
+    try {
+      const invites = await api("/api/v1/admin/invites");
+      $("invites").innerHTML = invites.length
+        ? invites.map((inv) => `<div style="padding:5px 0;border-bottom:1px solid #17202c">
+            <span class="mono">${esc(inv.code_prefix)}</span>
+            <span class="muted"> · ${esc(inv.uses_count)}/${esc(inv.max_uses)} uses · ${inv.is_valid ? "valid" : "expired/revoked"}</span>
+          </div>`).join("")
+        : `<span class="muted">No invites yet.</span>`;
+    } catch (_) {}
+  }
+
+  function fmtDate(value) {
+    if (!value) return "—";
+    const d = new Date(value);
+    return isNaN(d.getTime()) ? String(value) : d.toLocaleString();
+  }
+
+  function renderKeys() {
+    if (!state.keys.length) {
+      $("keysList").textContent = "No keys issued yet.";
+      return;
+    }
+    $("keysList").innerHTML = state.keys.map((key) => `
+      <div style="padding:8px 0;border-bottom:1px solid #17202c">
+        <div style="display:flex;align-items:center;gap:8px">
+          <b class="mono">${esc(key.prefix)}…</b>
+          <span>${esc(key.name)}</span>
+          ${key.revoked ? statePill("revoked") : statePill("active")}
+          <span class="muted small" style="margin-left:auto">${esc(key.rate_limit_per_min)}/min</span>
+        </div>
+        <div class="muted small">created ${esc(fmtDate(key.created_at))} · last used ${esc(fmtDate(key.last_used_at))}</div>
+        ${key.revoked ? "" : `<button class="btn bad" data-revoke-key="${esc(key.id)}" style="margin-top:5px">Revoke</button>`}
+      </div>
+    `).join("");
+  }
+
+  async function loadKeys() {
+    try {
+      const data = await api("/api/v1/admin/keys");
+      state.keys = data.data || [];
+      renderKeys();
+    } catch (err) {
+      $("keysList").textContent = err.message;
+    }
+  }
+
+  async function createKey() {
+    const name = $("keyName").value.trim() || "agent";
+    const limit = Number($("keyLimit").value || 60);
+    try {
+      const result = await fetch("/api/v1/admin/keys", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-RACON-TOKEN": state.token, "Authorization": "Bearer " + state.token },
+        body: JSON.stringify({ name, rate_limit_per_min: limit }),
+      }).then(async (res) => {
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || body?.error?.message || res.statusText);
+        return body;
+      });
+      $("keyResult").innerHTML = `New key (copy it now):<br><code style="word-break:break-all">${esc(result.key)}</code>`;
+      toast("Inference key created", "ok");
+      loadKeys();
+    } catch (err) {
+      $("keyResult").textContent = err.message;
+      toast(err.message, "error");
+    }
+  }
+
+  async function revokeKey(keyId) {
+    try {
+      const res = await fetch(`/api/v1/admin/keys/${encodeURIComponent(keyId)}`, {
+        method: "DELETE",
+        headers: { "X-RACON-TOKEN": state.token, "Authorization": "Bearer " + state.token },
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || body?.error?.message || res.statusText);
+      }
+      toast("Key revoked", "ok");
+      loadKeys();
+    } catch (err) {
+      toast(err.message, "error");
+    }
+  }
+
+  function switchTab(tab) {
+    state.activeTab = tab;
+    document.querySelectorAll("nav.tabs button").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
+    document.querySelectorAll(".tabpane").forEach((pane) => pane.classList.toggle("active", pane.id === "tab-" + tab));
+    if (tab === "downloads") loadInvites();
+    if (tab === "diagnostics") loadDiagnostics();
+    if (tab === "keys") loadKeys();
+  }
+
+  // Events
+  $("loginBtn").addEventListener("click", async () => {
+    const token = $("tokenInput").value.trim();
+    if (!token) { $("loginError").textContent = "Enter the API token."; return; }
+    state.token = token;
+    sessionStorage.setItem("racon_admin_token", token);
+    try {
+      await api("/api/v1/admin/overview");
+      showApp();
+    } catch (err) {
+      state.token = "";
+      sessionStorage.removeItem("racon_admin_token");
+      $("loginError").textContent = "Could not connect: " + err.message;
+    }
+  });
+  $("tokenInput").addEventListener("keydown", (e) => { if (e.key === "Enter") $("loginBtn").click(); });
+  $("logoutBtn").addEventListener("click", () => { state.token = ""; sessionStorage.removeItem("racon_admin_token"); showLogin(""); });
+  $("pauseBtn").addEventListener("click", () => {
+    state.paused = !state.paused;
+    $("pauseBtn").textContent = state.paused ? "Resume live" : "Pause live";
+    $("pauseBtn").classList.toggle("primary", state.paused);
+  });
+  document.querySelectorAll("nav.tabs button").forEach((btn) => btn.addEventListener("click", () => switchTab(btn.dataset.tab)));
+  ["workerFilter", "workerState"].forEach((id) => $(id).addEventListener("input", renderWorkers));
+  $("refreshWorkers").addEventListener("click", () => refreshAll(false));
+  ["eventFilter", "eventType"].forEach((id) => $(id).addEventListener("input", renderEvents));
+  $("clearEvents").addEventListener("click", () => { state.events = []; state.lastEventId = 0; renderEvents(); });
+
+  $("workers").addEventListener("click", async (event) => {
+    const approve = event.target.getAttribute("data-approve");
+    const revoke = event.target.getAttribute("data-revoke");
+    try {
+      if (approve) { await api(`/api/v1/admin/workers/${encodeURIComponent(approve)}/approve`); toast("Worker approved", "ok"); }
+      if (revoke) { await api(`/api/v1/admin/workers/${encodeURIComponent(revoke)}/revoke`); toast("Worker revoked", "ok"); }
+      if (approve || revoke) refreshAll(false);
+    } catch (err) { toast(err.message, "error"); }
+  });
+
+  $("dispatchBtn").addEventListener("click", async () => {
+    const node_id = $("dispatchNode").value;
+    if (!node_id) { toast("No online approved worker", "error"); return; }
+    const payload = {
+      node_id,
+      model_name: $("dispatchModel").value.trim(),
+      prompt: $("dispatchPrompt").value.trim(),
+      max_tokens: Number($("dispatchTokens").value || 128),
+    };
+    if (!payload.prompt) { toast("Prompt is required", "error"); return; }
+    try {
+      const result = await fetch("/api/v1/admin/tasks/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-RACON-TOKEN": state.token, "Authorization": "Bearer " + state.token },
+        body: JSON.stringify(payload),
+      }).then(async (res) => {
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || body?.error?.message || res.statusText);
+        return body;
+      });
+      toast(`Task ${result.task_id} assigned to ${payload.node_id}`, "ok");
+      refreshAll(false);
+    } catch (err) { toast(err.message, "error"); }
+  });
+
+  $("runDiagnostics").addEventListener("click", loadDiagnostics);
+  $("routeBtn").addEventListener("click", previewRoute);
+  $("createKey").addEventListener("click", createKey);
+  $("keysList").addEventListener("click", (event) => {
+    const keyId = event.target.getAttribute("data-revoke-key");
+    if (keyId) revokeKey(keyId);
+  });
+
+  $("createInvite").addEventListener("click", async () => {
+    try {
+      const result = await fetch("/api/v1/admin/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-RACON-TOKEN": state.token, "Authorization": "Bearer " + state.token },
+        body: JSON.stringify({
+          max_uses: Number($("inviteUses").value || 5),
+          expiry_hours: Number($("inviteHours").value || 24),
+        }),
+      }).then(async (res) => {
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.detail || res.statusText);
+        return body;
+      });
+      $("inviteResult").innerHTML = `New invite: <b class="mono">${esc(result.invite_code)}</b>`;
+      loadInvites();
+    } catch (err) { toast(err.message, "error"); }
+  });
+
+  // Boot
+  const urlToken = new URLSearchParams(location.search).get("token");
+  const stored = urlToken || sessionStorage.getItem("racon_admin_token") || "";
+  if (stored) {
+    state.token = stored;
+    sessionStorage.setItem("racon_admin_token", stored);
+    api("/api/v1/admin/overview").then(showApp).catch(() => showLogin("Token rejected. Enter the server API token."));
+  } else {
+    showLogin("");
+  }
+})();
+</script>
+</body>
+</html>

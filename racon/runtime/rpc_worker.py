@@ -20,6 +20,10 @@ from racon.runtime.distributed_gguf import find_llama_tool, llama_process_env
 logger = logging.getLogger(__name__)
 
 
+def _env_cache_default() -> bool:
+    return os.environ.get("RACON_RPC_CACHE", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def describe_rpc_exit(code: int) -> str:
     """Explain an rpc-server exit code, including POSIX signals such as SIGILL."""
     if code < 0:
@@ -68,19 +72,35 @@ class RpcServerProcess:
         host: str = "127.0.0.1",
         port: int = 50052,
         threads: int = 4,
-        enable_cache: bool = True,
+        enable_cache: Optional[bool] = None,
         log_file: Optional[str] = None,
     ) -> None:
         self.host = host
         self.port = port
         self.threads = threads
-        self.enable_cache = enable_cache
+        # llama.cpp's -c local cache writes every received tensor to disk before the head can use
+        # it. On an old laptop or HDD that turns a network load into a disk load and can push the
+        # transfer past the head's startup window. Memory-only is the default; RACON_RPC_CACHE=1
+        # (or --cache) re-enables it for fast disks where re-loading the same split is common.
+        self.enable_cache = _env_cache_default() if enable_cache is None else enable_cache
         self.log_file = log_file
         self._process: Optional[subprocess.Popen] = None
         self._bin_path: Optional[str] = None
         self._log_handle: Optional[Any] = None
         self.last_error: Optional[str] = None
         self.log_path: Optional[str] = log_file
+
+    def build_command(self) -> List[str]:
+        """rpc-server argv. Shared with tests so the cache flag cannot drift."""
+        cmd = [
+            self._bin_path or "rpc-server",
+            "-H", self.host,
+            "-p", str(self.port),
+            "-t", str(self.threads),
+        ]
+        if self.enable_cache:
+            cmd.append("-c")
+        return cmd
 
     def _close_log(self) -> None:
         if self._log_handle is not None:
@@ -128,16 +148,12 @@ class RpcServerProcess:
                 "folder that contains rpc-server."
             )
 
-        cmd = [
-            self._bin_path,
-            "-H", self.host,
-            "-p", str(self.port),
-            "-t", str(self.threads),
-        ]
-        if self.enable_cache:
-            cmd.append("-c")
+        cmd = self.build_command()
 
-        logger.info("Starting rpc-server: %s", " ".join(cmd))
+        logger.info(
+            "Starting rpc-server: %s (local cache: %s)",
+            " ".join(cmd), "on" if self.enable_cache else "off",
+        )
         try:
             if not self.log_path:
                 from racon.config import get_log_dir

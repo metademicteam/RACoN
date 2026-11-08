@@ -26,6 +26,10 @@ from protocols import (
 
 logger = logging.getLogger(__name__)
 
+#: Session lifetime. A live worker renews this every heartbeat, so a long generation can
+#: keep posting progress without the token expiring mid-stream.
+SESSION_TTL_SECONDS = 15 * 60
+
 
 class NodeRecord(BaseModel):
     node_id: str
@@ -40,6 +44,8 @@ class NodeRecord(BaseModel):
     cpu_util_pct: float = 0.0
     ram_available_mb: float = 0.0
     active_tasks: List[str] = Field(default_factory=list)
+    models: List[str] = Field(default_factory=list)
+    features: List[str] = Field(default_factory=list)
 
 
 class NodeRegistry:
@@ -85,10 +91,29 @@ class NodeRegistry:
                 message="Invite code is invalid, expired, or already consumed.",
             )
 
-        # 3. Determine initial trust state
+        # 3. Determine initial trust state. Re-enrollment must not silently reset an
+        # operator decision: an approved node stays approved, a pending node stays pending,
+        # and a revoked identity cannot rejoin with the public join code.
         trust_state = TrustState.APPROVED if auto_approve else TrustState.PENDING
+        with self._lock:
+            previous = self._nodes.get(request.node_id)
+            if previous is not None:
+                if previous.trust_state == TrustState.REVOKED:
+                    logger.warning("Rejected re-enrollment for revoked node %s", request.node_id)
+                    return EnrollmentResponse(
+                        status="rejected",
+                        node_id=request.node_id,
+                        trust_state=TrustState.REVOKED,
+                        coordinator_public_key=self.coordinator_public_key_hex,
+                        message="This node identity has been revoked by the operator.",
+                    )
+                if previous.trust_state == TrustState.APPROVED:
+                    trust_state = TrustState.APPROVED
+                elif previous.trust_state == TrustState.PENDING:
+                    trust_state = TrustState.PENDING
+
         token = secrets.token_urlsafe(32)
-        token_expiry = time.time() + (15 * 60)  # 15 minutes session token
+        token_expiry = time.time() + SESSION_TTL_SECONDS
 
         record = NodeRecord(
             node_id=request.node_id,
@@ -101,6 +126,8 @@ class NodeRegistry:
             session_token=token,
             session_token_expiry=token_expiry,
             ram_available_mb=request.capabilities.ram_available_mb,
+            models=list(request.models),
+            features=list(request.features),
         )
 
         with self._lock:
@@ -140,11 +167,21 @@ class NodeRegistry:
             except Exception:
                 return HeartbeatAck(node_id=message.node_id, status="error", commands=["auth_failure"])
 
-            # Update telemetry & freshness
-            record.last_heartbeat = time.time()
+            # Update telemetry & freshness. The signed heartbeat also proves the worker
+            # identity, so renew its session token: without this a worker stayed "online"
+            # while its token expired, and every /tasks/progress post returned 401. The
+            # gateway then reported "worker did not produce a token within 90s".
+            now = time.time()
+            record.last_heartbeat = now
             record.cpu_util_pct = message.cpu_util_pct
             record.ram_available_mb = message.ram_available_mb
             record.active_tasks = message.active_tasks
+            # Refresh the routing inventory so a model installed or removed after
+            # enrollment is visible to the network gateway on the next heartbeat.
+            if message.models_reported:
+                record.models = list(message.models)
+            if record.session_token:
+                record.session_token_expiry = now + SESSION_TTL_SECONDS
             if record.trust_state == TrustState.OFFLINE:
                 record.trust_state = TrustState.APPROVED
 

@@ -8,7 +8,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     RACON_HOST=0.0.0.0 \
     RACON_PORT=8765 \
     RACON_DATA_DIR=/data \
-    AUTH_TOKEN=racon-local-dev-token \
     OLLAMA_URL=http://host.docker.internal:11434 \
     RACON_CORS_ORIGINS=*
 

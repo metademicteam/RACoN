@@ -60,6 +60,25 @@ def _no_window_flags() -> int:
     return 0x08000000 if platform.system() == "Windows" else 0
 
 
+def friendly_os_name() -> str:
+    """Return a human-readable OS label instead of the raw kernel build string."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            with open("/etc/os-release", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("PRETTY_NAME="):
+                        return line.split("=", 1)[1].strip().strip('"')[:128]
+        except OSError:
+            pass
+        return f"Linux {platform.release()}".strip()
+    if system == "Windows":
+        return f"Windows {platform.version()}".strip()
+    if system == "Darwin":
+        return f"macOS {platform.mac_ver()[0]}".strip()
+    return f"{system} {platform.release()}".strip()
+
+
 def _parse_cpuinfo_name(text: str) -> Optional[str]:
     for line in text.splitlines():
         if line.lower().startswith("model name"):
@@ -228,8 +247,8 @@ def discover_hardware() -> HardwareSnapshot:
 
     # System
     try:
-        snap.os_name = platform.system()
-        snap.os_version = platform.version()
+        snap.os_name = friendly_os_name()
+        snap.os_version = platform.release()
         snap.os_architecture = platform.machine()
         snap.python_version = platform.python_version()
     except Exception as e:

@@ -123,6 +123,10 @@ def worker(
     bind: str = typer.Option(..., help="This PC's Tailscale IP (100.x.y.z). Never 0.0.0.0 on a public network"),
     port: int = typer.Option(50052, help="RPC port to expose to the head"),
     threads: int = typer.Option(4, help="CPU threads for rpc-server"),
+    cache: bool = typer.Option(
+        False, "--cache/--no-cache",
+        help="Keep received tensors in rpc-server's local file cache (slower first load, faster reloads)",
+    ),
 ) -> None:
     """Run an RPC layer worker on this PC, bound to a single address the head can reach over Tailscale."""
     import ipaddress
@@ -136,11 +140,14 @@ def worker(
         typer.echo("Refusing to bind rpc-server to all interfaces; llama.cpp RPC has no authentication.", err=True)
         raise typer.Exit(1)
 
-    rpc = RpcServerProcess(host=bind, port=port, threads=threads, enable_cache=True)
+    rpc = RpcServerProcess(host=bind, port=port, threads=threads, enable_cache=cache)
     if not rpc.start():
         typer.echo("rpc-server failed to start. Check that llama.cpp is installed.", err=True)
         raise typer.Exit(1)
-    typer.echo(f"rpc-server listening on {bind}:{port}. Add this to the head's cluster.json. Press Ctrl+C to stop.")
+    typer.echo(
+        f"rpc-server listening on {bind}:{port} (local cache: {'on' if rpc.enable_cache else 'off'}). "
+        "Add this to the head's cluster.json. Press Ctrl+C to stop."
+    )
     try:
         while rpc.is_running():
             time.sleep(2)

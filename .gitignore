@@ -46,6 +46,7 @@ racon_diagnostics.json
 .commandcode/
 .vscode/
 .idea/
+.openidea/
 *.swp
 *.swo
 Thumbs.db
@@ -74,3 +75,7 @@ target/
 
 
 d-inference-master/
+
+# Local reference snapshots and vendored clones (not part of the product tree)
+racon_original/
+mesh-llm/

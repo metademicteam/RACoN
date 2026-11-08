@@ -111,13 +111,19 @@ cached site scripts.
 Windows (after compiling `dist\installer\RACoN_Setup_v<version>.exe`):
 
 ```powershell
-.\scripts\publish_website.ps1 -Version 1.0.6
+.\scripts\publish_website.ps1 -Version 1.1.0
 ```
 
-Linux/Ubuntu (after `./scripts/build_linux.sh`):
+Windows and Linux from one command (after both artifacts exist):
+
+```powershell
+.\scripts\publish_website.ps1 -Version 1.1.0 -IncludeLinux
+```
+
+Linux-only environments can still use:
 
 ```bash
-./scripts/publish_website.sh --version 1.0.6 --linux
+./scripts/publish_website.sh --version 1.1.0 --linux
 ```
 
 Each publisher copies its artifact to `dist/website_downloads`, computes SHA-256, and merges its

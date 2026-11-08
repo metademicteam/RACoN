@@ -5,7 +5,13 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from backend.racon.orchestration.model_router import (
+    build_profiles_from_engine,
+    route_request,
+)
+from racon.services.engine_service import get_engine
 
 from ..scenarios.loader import get_scenario, load_scenarios
 from ..scheduler.engine import get_scheduling_engine
@@ -31,6 +37,35 @@ class SchedulerPreviewRequest(BaseModel):
     objective: Optional[SchedulingObjective] = SchedulingObjective.BALANCED
     mode: Optional[SchedulingMode] = SchedulingMode.DETERMINISTIC
     candidates: Optional[list[WorkerCandidate]] = None
+
+
+class RoutePreviewRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=6000)
+    model: str = Field(default="auto", max_length=128)
+    system: Optional[str] = Field(default=None, max_length=6000)
+    tools: Optional[list[dict]] = None
+
+
+@router.post("/route")
+async def preview_model_route(req: RoutePreviewRequest):
+    """Preview the deterministic smart-router decision for a request.
+
+    This is the same classifier and selector used by ``model="auto"`` on
+    ``POST /v1/chat/completions``. It returns the category, complexity, every scored
+    candidate and the reason the winner was chosen.
+    """
+    messages: list[dict] = []
+    if req.system:
+        messages.append({"role": "system", "content": req.system})
+    messages.append({"role": "user", "content": req.prompt})
+    profiles = await build_profiles_from_engine(get_engine())
+    decision = route_request(
+        messages,
+        requested_model=req.model,
+        profiles=profiles,
+        tools=req.tools,
+    )
+    return decision.to_dict()
 
 
 @router.get("/config")

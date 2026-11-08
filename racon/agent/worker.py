@@ -17,7 +17,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -44,6 +44,40 @@ from racon.hardware import discover_hardware, get_lightweight_update
 from racon.agent.crypto_store import AgentKeyStore
 
 logger = logging.getLogger(__name__)
+
+
+class _OllamaUnavailable(RuntimeError):
+    """Signal that the Ollama chat path cannot serve this request."""
+
+
+class _OllamaModelIncompatible(RuntimeError):
+    """The model exists but cannot accept this request (for example, tools)."""
+
+
+def _ollama_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    converted: List[Dict[str, Any]] = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        payload = {
+            key: value
+            for key, value in message.items()
+            if key in ("role", "content", "name", "tool_calls", "tool_call_id") and value is not None
+        }
+        content = payload.get("content")
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                part_type = str(part.get("type") or "")
+                if part_type in ("text", "input_text") and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"])
+                elif part_type in ("image_url", "input_image", "image", "audio_url", "input_audio"):
+                    raise _OllamaUnavailable("Ollama cannot accept OpenAI media content parts")
+            payload["content"] = "\n".join(text_parts)
+        converted.append(payload)
+    return converted
 
 
 class AgentStatus:
@@ -88,6 +122,8 @@ class RaconAgent:
         self._coordinator_public_key_hex: Optional[str] = None
         self._stop_event = threading.Event()
         self._worker_thread: Optional[threading.Thread] = None
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._current_task_id: Optional[str] = None
         self.rpc_server: Optional[Any] = None
         self.rpc_endpoint: Optional[str] = None
         self.rpc_last_error: Optional[str] = None
@@ -96,6 +132,33 @@ class RaconAgent:
         self._join_code: Optional[str] = None
         self._rpc_bind: Optional[str] = None
         self.gateway_key: Optional[str] = None
+
+    def _advertised_models(self) -> list[str]:
+        """Describe the models this worker can serve.
+
+        Ollama tags are read from the local daemon; GGUF ids come from the RACoN model
+        manager. The list is a routing hint, bounded to the protocol's 64 entries.
+        """
+        models: list[str] = []
+        try:
+            response = httpx.get("http://127.0.0.1:11434/api/tags", timeout=1.5)
+            if response.status_code == 200:
+                for item in response.json().get("models", []) or []:
+                    name = item.get("name") or item.get("model")
+                    if name and str(name) not in models:
+                        models.append(str(name))
+        except Exception:
+            pass
+        try:
+            from racon.models.manager import ModelManager
+            from racon.settings import get_settings
+
+            for installed in ModelManager(get_settings().resolved_models_dir).installed():
+                if installed.id not in models:
+                    models.append(installed.id)
+        except Exception:
+            pass
+        return models[:64]
 
     def enroll(self, invite_code: str) -> bool:
         """Enroll with coordinator using an invite code."""
@@ -115,7 +178,7 @@ class RaconAgent:
             gpu_name=hw.gpu.name,
             gpu_vram_mb=hw.gpu.vram_total_mb,
             runtimes=["ollama", "local"],
-            os_name=f"{hw.os_name} {hw.os_version}".strip()[:128],
+            os_name=hw.os_name[:128],
             is_simulated=False,
             rpc_endpoint=(
                 self.rpc_endpoint
@@ -125,19 +188,9 @@ class RaconAgent:
 
         self._join_code = invite_code
         now = time.time()
-        # Sign canonical payload
-        from protocols.crypto import canonicalize_json
-        payload = canonicalize_json({
-            "node_id": self.node_id,
-            "public_key_hex": self._public_key_hex,
-            "invite_code": invite_code,
-            "role": NodeRole.CONTRIBUTOR.value,
-            "capabilities": caps.model_dump(),
-            "protocol_version": PROTOCOL_VERSION,
-            "timestamp": now,
-        })
-        sig = sign_message(self._private_key, payload)
-
+        # Build the request first, then sign exactly the bytes the coordinator verifies.
+        # The model inventory is included only when non-empty, so older agents keep a
+        # compatible canonical payload.
         req = EnrollmentRequest(
             node_id=self.node_id,
             public_key_hex=self._public_key_hex,
@@ -146,8 +199,11 @@ class RaconAgent:
             capabilities=caps,
             protocol_version=PROTOCOL_VERSION,
             timestamp=now,
-            signature=sig,
+            models=self._advertised_models(),
+            features=["text_generation", "streaming_chat"],
+            signature="0" * 128,
         )
+        req.signature = sign_message(self._private_key, req.payload_bytes())
 
         try:
             with httpx.Client(timeout=10.0) as client:
@@ -242,7 +298,7 @@ class RaconAgent:
         if coordinator_url:
             self.coordinator_url = coordinator_url.strip().rstrip("/")
         else:
-            self.coordinator_url = netdefaults.DEFAULT_COORDINATOR_URL
+            self.coordinator_url = netdefaults.default_coordinator_url()
         self.status.coordinator_url = self.coordinator_url
 
         code = join_code or os.environ.get("RACON_JOIN_CODE") or netdefaults.DEFAULT_JOIN_CODE
@@ -271,27 +327,19 @@ class RaconAgent:
         now = time.time()
         nonce = secrets.token_hex(16)
 
-        # Canonical payload
-        from protocols.crypto import canonicalize_json
-        payload = canonicalize_json({
-            "node_id": self.node_id,
-            "timestamp": now,
-            "nonce": nonce,
-            "cpu_util_pct": hw_update["cpu_utilization_pct"],
-            "ram_available_mb": hw_update["ram_available_mb"],
-            "active_tasks": [],
-        })
-        sig = sign_message(self._private_key, payload)
-
+        active_tasks = [self._current_task_id] if self._current_task_id else []
         msg = HeartbeatMessage(
             node_id=self.node_id,
             timestamp=now,
             nonce=nonce,
             cpu_util_pct=hw_update["cpu_utilization_pct"],
             ram_available_mb=hw_update["ram_available_mb"],
-            active_tasks=[],
-            signature=sig,
+            active_tasks=active_tasks,
+            models=self._advertised_models(),
+            models_reported=True,
+            signature="0" * 128,
         )
+        msg.signature = sign_message(self._private_key, msg.payload_bytes())
 
         try:
             with httpx.Client(timeout=5.0) as client:
@@ -342,12 +390,22 @@ class RaconAgent:
                 model_name = task_data["model_name"]
                 parameters = task_data["parameters"]
 
+                if not self._verify_coordinator_task(task_data):
+                    logger.error("Rejected task %s: coordinator signature is invalid", task_id)
+                    return False
+
                 logger.info("Claimed task %s (type=%s)", task_id, task_type)
                 self.status.active_tasks_count += 1
+                self._current_task_id = task_id
                 start_time = time.monotonic()
 
                 # Execute allow-listed task
-                result_data, error = self._execute_task_workload(task_type, model_name, parameters)
+                try:
+                    result_data, error = self._execute_task_workload(
+                        task_type, model_name, parameters, task_id=task_id
+                    )
+                finally:
+                    self._current_task_id = None
                 duration_ms = (time.monotonic() - start_time) * 1000
 
                 # Formulate signed TaskResultEnvelope
@@ -387,53 +445,115 @@ class RaconAgent:
             logger.error("Task execution/claim cycle error: %s", e)
             return False
 
+    def _verify_coordinator_task(self, task_data: Dict[str, Any]) -> bool:
+        """Verify the coordinator's Ed25519 signature over the claimed task envelope."""
+        if not self._coordinator_public_key_hex:
+            logger.warning("No coordinator public key stored; rejecting unverifiable task")
+            return False
+        try:
+            envelope = TaskEnvelope.model_validate(task_data)
+            coordinator_pub = load_public_key_from_hex(self._coordinator_public_key_hex)
+            return verify_signature(
+                coordinator_pub,
+                envelope.payload_bytes(),
+                envelope.coordinator_signature,
+            )
+        except Exception as exc:
+            logger.error("Coordinator signature verification failed: %s", exc)
+            return False
+
     def _execute_task_workload(
         self,
         task_type: str,
         model_name: str,
         parameters: Dict[str, Any],
+        task_id: Optional[str] = None,
     ) -> tuple[Dict[str, Any], Optional[str]]:
         """Strictly allow-listed task execution (ADR-007, Rule 2).
         
         Zero arbitrary code execution or unpickling.
         """
+        # 0. Streaming OpenAI chat completion
+        if task_type == TaskType.CHAT_COMPLETION.value or task_type == "chat_completion":
+            if not task_id:
+                return {}, "chat_completion requires a task id"
+            return self._chat_completion(model_name, parameters, task_id)
+
         # 1. Benchmark Probe
         if task_type == TaskType.BENCHMARK_PROBE.value or task_type == "benchmark_probe":
-            # Deterministic compute loop measuring memory throughput
+            # Deterministic integer loop: a reproducible CPU throughput probe.
+            iterations = int(parameters.get("iterations", 500000))
             start = time.perf_counter()
-            total = sum(i * i for i in range(500000))
+            checksum = sum(i * i for i in range(iterations))
             elapsed = time.perf_counter() - start
             return {
-                "probe_result": total,
+                "probe_result": checksum,
+                "iterations": iterations,
                 "compute_time_seconds": elapsed,
-                "mode": "OBSERVED",
+                "metric": "integer_loop_throughput",
+                "mode": "MEASURED",
             }, None
 
         # 2. Text Completion
         elif task_type == TaskType.TEXT_COMPLETION.value or task_type == "text_completion":
             prompt = parameters.get("prompt", "Hello RACoN")
-            # Try live local Ollama instance if accessible
+            max_tokens = int(parameters.get("max_tokens", 512) or 512)
+            timeout_s = float(parameters.get("timeout_s", 300.0))
+
+            # Preferred path: a local Ollama daemon. This keeps the worker contract
+            # identical on machines that already run Ollama.
+            ollama_error: Optional[str] = None
             try:
                 resp = httpx.post(
                     "http://127.0.0.1:11434/api/generate",
-                    json={"model": model_name, "prompt": prompt, "stream": False},
-                    timeout=15.0,
+                    json={
+                        "model": model_name,
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"num_predict": max_tokens},
+                    },
+                    timeout=timeout_s,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    return {
-                        "response": data.get("response", ""),
-                        "eval_count": data.get("eval_count", 0),
-                        "runtime": "ollama_live",
-                        "mode": "OBSERVED",
-                    }, None
-            except Exception:
-                pass  # Fall back to verified deterministic completion response
+                    text = data.get("response", "")
+                    if text:
+                        return {
+                            "response": text,
+                            "eval_count": data.get("eval_count", 0),
+                            "prompt_eval_count": data.get("prompt_eval_count", 0),
+                            "runtime": "ollama",
+                            "mode": "OBSERVED",
+                        }, None
+                    ollama_error = "Ollama returned an empty completion"
+                else:
+                    ollama_error = f"Ollama returned HTTP {resp.status_code}"
+            except Exception as exc:
+                ollama_error = f"Ollama unreachable: {exc}"
+
+            # Fallback: this worker's own RACoN engine (llama.cpp GGUF or Ollama
+            # adapter). Without this a Windows worker with llama.cpp installed could join
+            # the network but never complete a task. A failure is still reported as a
+            # failure; no placeholder text is ever produced.
+            try:
+                text, usage, runtime = self._engine_completion(
+                    model_name, prompt, max_tokens, timeout_s
+                )
+            except Exception as exc:
+                return {}, (
+                    f"No inference runtime reachable on this worker. {ollama_error}. "
+                    f"Local engine error: {type(exc).__name__}: {exc}"
+                )
+
+            if not text:
+                return {}, f"Local engine returned an empty completion ({ollama_error})."
 
             return {
-                "response": f"[RACoN Worker {self.node_id}] Processed completion for prompt: '{prompt[:30]}...'",
-                "runtime": "local_worker_adapter",
-                "mode": "LOCAL",
+                "response": text,
+                "eval_count": int(usage.get("completion_tokens") or 0),
+                "prompt_eval_count": int(usage.get("prompt_tokens") or 0),
+                "runtime": runtime,
+                "mode": "OBSERVED",
             }, None
 
         # 3. Distributed Layer Inference (ADR-012)
@@ -485,6 +605,365 @@ class RaconAgent:
         else:
             return {}, f"Disallowed task type: '{task_type}'. Workers accept allow-listed tasks only."
 
+    def _chat_completion(
+        self,
+        model_name: str,
+        parameters: Dict[str, Any],
+        task_id: str,
+    ) -> tuple[Dict[str, Any], Optional[str]]:
+        """Stream an OpenAI chat completion and push deltas to the coordinator."""
+        import asyncio
+
+        messages = parameters.get("messages") or []
+        options = parameters.get("options") or {}
+        if not messages:
+            return {}, "chat_completion requires messages"
+        timeout_s = float(parameters.get("timeout_s", 600.0) or 600.0)
+
+        # Preferred path: the worker's Ollama daemon. It is already resident, streams
+        # natively, and avoids binding an async HTTP client to a transient event loop.
+        ollama_error: Optional[str] = None
+        try:
+            return self._ollama_chat_stream(
+                model_name, messages, options, task_id, timeout_s
+            )
+        except _OllamaModelIncompatible as exc:
+            # The model exists but cannot satisfy this request. Falling back to the
+            # engine would only produce a misleading "model not installed" error.
+            return {}, str(exc)
+        except _OllamaUnavailable as exc:
+            ollama_error = str(exc)
+            logger.debug("Ollama chat streaming unavailable for %s: %s", task_id, ollama_error)
+        except Exception as exc:
+            ollama_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("Ollama chat streaming failed for %s: %s", task_id, ollama_error)
+
+        async def _run() -> tuple[Dict[str, Any], Optional[str]]:
+            import httpx
+
+            from racon.runtime.types import ChatMessage
+            from racon.services.engine_service import get_engine
+
+            engine = get_engine()
+            chat_messages = [
+                ChatMessage(
+                    role=item.get("role", "user"),
+                    content=item.get("content"),
+                    name=item.get("name"),
+                    tool_calls=item.get("tool_calls"),
+                    tool_call_id=item.get("tool_call_id"),
+                )
+                for item in messages
+                if isinstance(item, dict)
+            ]
+
+            kwargs = {
+                "model": model_name,
+                "max_tokens": int(options.get("max_tokens", 512) or 512),
+                "temperature": float(options.get("temperature", 0.7) or 0.7),
+                "top_p": float(options.get("top_p", 0.95) or 0.95),
+                "stop": options.get("stop"),
+                "tools": options.get("tools"),
+                "tool_choice": options.get("tool_choice"),
+                "response_format": options.get("response_format"),
+                "seed": options.get("seed"),
+                "presence_penalty": options.get("presence_penalty"),
+                "frequency_penalty": options.get("frequency_penalty"),
+                "parallel_tool_calls": options.get("parallel_tool_calls"),
+            }
+
+            text_parts: list[str] = []
+            tool_calls: list[Dict[str, Any]] = []
+            usage: Dict[str, Any] = {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "reported": False,
+            }
+            finish_reason: Optional[str] = None
+            seq = 0
+            buffer = ""
+            last_flush = time.monotonic()
+
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                async def send(delta: Dict[str, Any], finish: Optional[str] = None) -> None:
+                    nonlocal seq, last_flush
+                    if not delta and not finish:
+                        return
+                    try:
+                        await client.post(
+                            f"{self.coordinator_url}/tasks/progress",
+                            json={
+                                "node_id": self.node_id,
+                                "task_id": task_id,
+                                "session_token": self._session_token or "",
+                                "seq": seq,
+                                "delta": delta,
+                                "finish_reason": finish,
+                            },
+                        )
+                    except Exception as exc:
+                        logger.debug("Progress post failed for %s: %s", task_id, exc)
+                    seq += 1
+                    last_flush = time.monotonic()
+
+                async def flush(force: bool = False, finish: Optional[str] = None) -> None:
+                    nonlocal buffer
+                    if not buffer and not finish:
+                        return
+                    delta: Dict[str, Any] = {}
+                    if buffer:
+                        delta["content"] = buffer
+                        buffer = ""
+                    await send(delta, finish)
+
+                async def _stream() -> None:
+                    nonlocal finish_reason, usage
+                    async for chunk in engine.chat_stream(chat_messages, **kwargs):
+                        if chunk.delta:
+                            text_parts.append(chunk.delta)
+                            buffer += chunk.delta
+                            if len(buffer) >= 400 or (time.monotonic() - last_flush) >= 0.08:
+                                await flush()
+                        if chunk.tool_calls:
+                            if buffer:
+                                await flush()
+                            tool_calls.extend(chunk.tool_calls)
+                            await send({"tool_calls": chunk.tool_calls})
+                        if chunk.usage is not None:
+                            usage = chunk.usage.to_dict()
+                        if chunk.finish_reason:
+                            finish_reason = chunk.finish_reason
+                    await flush(finish=finish_reason or "stop")
+
+                try:
+                    await asyncio.wait_for(_stream(), timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    return {}, f"chat completion timed out after {timeout_s:.0f}s"
+                except Exception as exc:
+                    return {}, f"{type(exc).__name__}: {exc}"
+
+            text = "".join(text_parts)
+            if not text and not tool_calls:
+                return {}, "runtime returned an empty chat completion"
+            return (
+                {
+                    "response": text,
+                    "tool_calls": tool_calls or None,
+                    "usage": usage,
+                    "finish_reason": finish_reason or ("tool_calls" if tool_calls else "stop"),
+                    "runtime": engine.runtime_name,
+                    "mode": "OBSERVED",
+                },
+                None,
+            )
+
+        try:
+            result = asyncio.run(_run())
+            if result[1] and ollama_error:
+                return {}, f"{result[1]} (Ollama: {ollama_error})"
+            return result
+        except Exception as exc:
+            logger.exception("chat_completion task %s failed", task_id)
+            detail = f"{type(exc).__name__}: {exc}"
+            if ollama_error:
+                detail += f" (Ollama: {ollama_error})"
+            return {}, detail
+
+    def _ollama_chat_stream(
+        self,
+        model_name: str,
+        messages: List[Dict[str, Any]],
+        options: Dict[str, Any],
+        task_id: str,
+        timeout_s: float,
+    ) -> tuple[Dict[str, Any], Optional[str]]:
+        """Stream a chat completion through the local Ollama daemon."""
+        import json
+
+        from racon.models.catalog import ollama_tag_for
+        from racon.runtime.tool_calls import normalise_tool_calls
+
+        ollama_model = ollama_tag_for(model_name) or model_name
+        body: Dict[str, Any] = {
+            "model": ollama_model,
+            "messages": _ollama_messages(messages),
+            "stream": True,
+            "options": {
+                "temperature": float(options.get("temperature", 0.7) or 0.7),
+                "top_p": float(options.get("top_p", 0.95) or 0.95),
+                "num_predict": int(options.get("max_tokens", 512) or 512),
+            },
+        }
+        if options.get("stop"):
+            body["options"]["stop"] = options["stop"]
+        if options.get("seed") is not None:
+            body["options"]["seed"] = options["seed"]
+        if options.get("tools"):
+            body["tools"] = options["tools"]
+        response_format = options.get("response_format") or {}
+        if response_format.get("type") == "json_object":
+            body["format"] = "json"
+        elif response_format.get("type") == "json_schema":
+            schema = (response_format.get("json_schema") or {}).get("schema")
+            if schema:
+                body["format"] = schema
+
+        text_parts: List[str] = []
+        tool_calls: List[Dict[str, Any]] = []
+        usage: Dict[str, Any] = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "reported": False,
+        }
+        finish_reason: Optional[str] = None
+        seq = 0
+        buffer = ""
+        last_flush = time.monotonic()
+
+        progress_client = httpx.Client(timeout=5.0)
+
+        def send(delta: Dict[str, Any], finish: Optional[str] = None) -> None:
+            nonlocal seq, last_flush
+            if not delta and not finish:
+                return
+            try:
+                response = progress_client.post(
+                    f"{self.coordinator_url}/tasks/progress",
+                    json={
+                        "node_id": self.node_id,
+                        "task_id": task_id,
+                        "session_token": self._session_token or "",
+                        "seq": seq,
+                        "delta": delta,
+                        "finish_reason": finish,
+                    },
+                )
+                if response.status_code == 401:
+                    # The heartbeat renews the token, so this only happens if the token was
+                    # invalidated or the coordinator restarted. Re-enrol before the next
+                    # delta instead of dropping the whole stream silently.
+                    logger.warning("Progress rejected (session expired); re-enrolling.")
+                    if self._join_code:
+                        self.enroll(self._join_code)
+            except Exception as exc:
+                logger.debug("Progress post failed for %s: %s", task_id, exc)
+            seq += 1
+            last_flush = time.monotonic()
+
+        def flush(force: bool = False, finish: Optional[str] = None) -> None:
+            nonlocal buffer
+            if not buffer and not finish:
+                return
+            delta: Dict[str, Any] = {}
+            if buffer:
+                delta["content"] = buffer
+                buffer = ""
+            send(delta, finish)
+
+        try:
+            with httpx.Client(timeout=httpx.Timeout(timeout_s, connect=10.0)) as client:
+                with client.stream(
+                    "POST", "http://127.0.0.1:11434/api/chat", json=body
+                ) as response:
+                    if response.status_code != 200:
+                        body = response.read().decode("utf-8", "replace")[:512]
+                        if (
+                            response.status_code == 400
+                            and "does not support tools" in body.lower()
+                        ):
+                            raise _OllamaModelIncompatible(
+                                f"Ollama model '{ollama_model}' does not support tool "
+                                "calling. Use a tool-capable model such as "
+                                "qwen2.5:0.5b or qwen2.5:1.5b, or send the request "
+                                "without tools."
+                            )
+                        raise _OllamaUnavailable(
+                            f"Ollama returned HTTP {response.status_code}: {body}"
+                        )
+                    for line in response.iter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        message = event.get("message") or {}
+                        content = message.get("content") or ""
+                        calls = message.get("tool_calls")
+                        if content:
+                            text_parts.append(str(content))
+                            buffer += str(content)
+                            if len(buffer) >= 400 or (time.monotonic() - last_flush) >= 0.08:
+                                flush()
+                        if calls:
+                            if buffer:
+                                flush()
+                            normalised_calls = normalise_tool_calls(calls)
+                            tool_calls.extend(normalised_calls)
+                            send({"tool_calls": normalised_calls})
+                        if event.get("done"):
+                            prompt_tokens = int(event.get("prompt_eval_count") or 0)
+                            completion_tokens = int(event.get("eval_count") or 0)
+                            usage = {
+                                "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens,
+                                "total_tokens": prompt_tokens + completion_tokens,
+                                "reported": True,
+                            }
+                            finish_reason = event.get("done_reason") or "stop"
+                            break
+
+            text = "".join(text_parts)
+            if not text and not tool_calls:
+                raise _OllamaUnavailable("Ollama returned an empty chat completion")
+            final_reason = "tool_calls" if tool_calls else (finish_reason or "stop")
+            flush(finish=final_reason)
+            return (
+                {
+                    "response": text,
+                    "tool_calls": tool_calls or None,
+                    "usage": usage,
+                    "finish_reason": final_reason,
+                    "runtime": "ollama",
+                    "mode": "OBSERVED",
+                },
+                None,
+            )
+        except httpx.HTTPError as exc:
+            raise _OllamaUnavailable(f"Ollama unreachable: {exc}") from exc
+        finally:
+            progress_client.close()
+
+    def _engine_completion(
+        self, model_name: str, prompt: str, max_tokens: int, timeout_s: float
+    ) -> tuple[str, Dict[str, Any], str]:
+        """Run a completion through this worker's local RACoN engine.
+
+        The engine selects llama.cpp or Ollama from this machine's settings, so a worker
+        with a GGUF installed can serve distributed tasks without a separate Ollama daemon.
+        """
+        import asyncio
+
+        from racon.runtime.types import ChatMessage
+        from racon.services.engine_service import get_engine
+
+        async def _run():
+            engine = get_engine()
+            result = await asyncio.wait_for(
+                engine.chat(
+                    [ChatMessage(role="user", content=prompt)],
+                    model=model_name,
+                    max_tokens=max_tokens,
+                ),
+                timeout=timeout_s,
+            )
+            return result, engine.runtime_name
+
+        result, runtime_name = asyncio.run(_run())
+        return result.text or "", result.usage.to_dict(), result.runtime or runtime_name
+
     def start(self, heartbeat_interval_s: float = 5.0) -> None:
         """Start the background worker thread."""
         if self.status.is_running:
@@ -493,15 +972,34 @@ class RaconAgent:
         self._stop_event.clear()
         self.status.is_running = True
 
-        def _loop():
-            logger.info("RACoN Agent worker loop started for node %s", self.node_id)
+        def _heartbeat_loop():
+            logger.info("RACoN Agent heartbeat loop started for node %s", self.node_id)
             while not self._stop_event.is_set():
-                self.send_heartbeat()
-                self.check_and_execute_task()
+                try:
+                    self.send_heartbeat()
+                except Exception as exc:  # heartbeat must never kill the loop
+                    logger.debug("Heartbeat loop error: %s", exc)
                 self._stop_event.wait(timeout=heartbeat_interval_s)
-            logger.info("RACoN Agent worker loop stopped")
+            logger.info("RACoN Agent heartbeat loop stopped")
 
-        self._worker_thread = threading.Thread(target=_loop, daemon=True, name="RACoNAgentWorker")
+        def _task_loop():
+            logger.info("RACoN Agent task loop started for node %s", self.node_id)
+            poll_interval = max(0.25, heartbeat_interval_s / 5.0)
+            while not self._stop_event.is_set():
+                try:
+                    self.check_and_execute_task()
+                except Exception as exc:
+                    logger.error("Task loop error: %s", exc)
+                self._stop_event.wait(timeout=poll_interval)
+            logger.info("RACoN Agent task loop stopped")
+
+        self._heartbeat_thread = threading.Thread(
+            target=_heartbeat_loop, daemon=True, name="RACoNAgentHeartbeat"
+        )
+        self._worker_thread = threading.Thread(
+            target=_task_loop, daemon=True, name="RACoNAgentWorker"
+        )
+        self._heartbeat_thread.start()
         self._worker_thread.start()
 
     def prepare_worker_shard(self, progress_callback: Optional[Any] = None) -> tuple[bool, str]:
@@ -556,13 +1054,26 @@ class RaconAgent:
             f"Log: {getattr(self.rpc_server, 'log_path', None) or 'unavailable'}."
         )
 
-    def start_rpc_worker(self, host: str = "127.0.0.1", port: int = 50052, threads: int = 4) -> bool:
-        """Start the native llama.cpp RPC server for remote layer execution."""
+    def start_rpc_worker(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 50052,
+        threads: int = 4,
+        enable_cache: Optional[bool] = None,
+    ) -> bool:
+        """Start the native llama.cpp RPC server for remote layer execution.
+
+        The disk cache (rpc-server -c) is off by default: it writes every model tensor to disk
+        before the head can use it, which on an old laptop turns a network load into a disk load.
+        Set RACON_RPC_CACHE=1 to trade first-load time for faster reloads on a fast SSD.
+        """
         from racon.runtime.rpc_worker import RpcServerProcess
         if self.rpc_server and self.rpc_server.is_running():
             self.rpc_last_error = None
             return True
-        self.rpc_server = RpcServerProcess(host=host, port=port, threads=threads)
+        self.rpc_server = RpcServerProcess(
+            host=host, port=port, threads=threads, enable_cache=enable_cache
+        )
         ok = self.rpc_server.start()
         if ok:
             self.rpc_endpoint = f"{host}:{port}"
@@ -585,6 +1096,8 @@ class RaconAgent:
         self.status.is_running = False
         if self._worker_thread and self._worker_thread.is_alive():
             self._worker_thread.join(timeout=3.0)
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=3.0)
         self.stop_rpc_worker()
 
     def pause(self) -> None:

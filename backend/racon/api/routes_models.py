@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..config import settings
@@ -130,26 +131,9 @@ MODEL_CATALOG: list[dict[str, Any]] = [
 # Track real-time pull status per model ID
 _PULL_STATUS: dict[str, dict[str, Any]] = {}
 
-_CACHED_MODELS: list[dict[str, Any]] = [
-    {
-        "name": "qwen2.5:1.5b",
-        "size_bytes": 1024 * 1024 * 980,
-        "format": "gguf",
-        "family": "qwen2",
-        "parameter_size": "1.5B",
-        "quantization_level": "Q4_K_M",
-        "runtime": "ollama",
-    },
-    {
-        "name": "qwen2.5:0.5b",
-        "size_bytes": 1024 * 1024 * 390,
-        "format": "gguf",
-        "family": "qwen2",
-        "parameter_size": "0.5B",
-        "quantization_level": "Q4_K_M",
-        "runtime": "ollama",
-    },
-]
+# Inventory cache. Empty until a runtime reports real models; never seeded with invented
+# sizes or names.
+_CACHED_MODELS: list[dict[str, Any]] = []
 
 
 class InferenceRequest(BaseModel):
@@ -177,6 +161,7 @@ async def get_model_catalog():
     """Retrieve the Handy-style model catalog with installation status."""
     installed_models = await list_models()
     installed_names = {m.get("name", "").lower() for m in installed_models}
+    installed_filenames = _installed_filenames()
 
     catalog = []
     for item in MODEL_CATALOG:
@@ -199,10 +184,216 @@ async def get_model_catalog():
         entry["pull_status"] = pull_info
         catalog.append(entry)
 
+    for item in _engine_catalog_items():
+        if any(existing["id"] == item["id"] for existing in catalog):
+            continue
+        installed = item["filename"] in installed_filenames
+        pull_info = _PULL_STATUS.get(item["id"], {
+            "status": "installed" if installed else "idle",
+            "percentage": 100 if installed else 0,
+            "message": "Ready" if installed else "Available to download from Hugging Face",
+        })
+        entry = dict(item)
+        entry["is_installed"] = installed
+        entry["pull_status"] = pull_info
+        catalog.append(entry)
+
     return {
         "catalog": catalog,
         "installed_count": sum(1 for c in catalog if c["is_installed"]),
         "total_available": len(catalog),
+    }
+
+
+def _installed_filenames() -> set[str]:
+    """Model filenames already present on disk, from the canonical model manager."""
+    try:
+        from racon.services.engine_service import get_engine
+
+        return {model.filename for model in get_engine().models.installed()}
+    except Exception as exc:
+        logger.debug("Could not enumerate installed GGUF files: %s", exc)
+        return set()
+
+
+def _engine_catalog_items() -> list[dict[str, Any]]:
+    """Catalog entries that carry a real download URL (Hugging Face or operator)."""
+    from racon.models.catalog import build_catalog
+
+    items: list[dict[str, Any]] = []
+    for entry in build_catalog():
+        if not entry.download_url:
+            continue
+        total = entry.total_size_bytes or 0
+        items.append({
+            "id": entry.id,
+            "name": entry.display_name,
+            "creator": "Hugging Face" if entry.source == "huggingface" else "RACoN",
+            "description": entry.description,
+            "size_bytes": total,
+            "size_display": f"{total / 1048576:.1f} MB" if total else "unknown size",
+            "parameter_size": entry.parameter_size or "unknown",
+            "accuracy_score": None,
+            "speed_score": None,
+            "recommended_ram_gb": round((entry.min_ram_mb or 0) / 1024, 2),
+            "format": f"GGUF {entry.quantization}".strip(),
+            "tags": ["Hugging Face", "GGUF", entry.parameter_size or "small"],
+            "streaming": True,
+            "source": entry.source,
+            "license": entry.license,
+            "repo_id": _repo_from_url(entry.download_url),
+            "filename": entry.files[0].filename if entry.files else None,
+            "sha256": entry.files[0].sha256 if entry.files else None,
+        })
+    return items
+
+
+def _repo_from_url(url: Optional[str]) -> Optional[str]:
+    if not url or "huggingface.co/" not in url:
+        return None
+    tail = url.split("huggingface.co/", 1)[1]
+    parts = tail.split("/")
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+@router.get("/recommendations")
+def model_recommendations():
+    """Recommend models from measured hardware, never from assumed specifications.
+
+    Catalog entries are compared against their declared RAM requirement. Installed GGUF
+    files use the real header-derived memory estimate. When a value cannot be measured the
+    result is ``fits: null`` with the reason, not a guess.
+    """
+    from ..hardware import discover_hardware
+    from racon.models.estimate import estimate_memory
+    from racon.services.engine_service import get_engine
+
+    snap = discover_hardware()
+    available = snap.ram_available_mb
+    total = snap.ram_total_mb
+    vram = snap.gpu.vram_total_mb
+    headroom = 0.9
+
+    recommendations: list[dict[str, Any]] = []
+    installed_ids: set[str] = set()
+    installed_filenames = _installed_filenames()
+
+    try:
+        installed_models = get_engine().models.installed()
+    except Exception as exc:
+        logger.warning("Could not enumerate installed models for recommendations: %s", exc)
+        installed_models = []
+
+    for model in installed_models:
+        installed_ids.add(model.id)
+        estimate = estimate_memory(str(model.path))
+        required = estimate.get("total_mb")
+        if required is None or available is None:
+            fits = None
+            reason = "Memory requirement could not be derived from the GGUF header."
+        else:
+            fits = available * headroom >= float(required)
+            reason = (
+                f"Estimated {float(required):.0f} MB needed; "
+                f"{available:.0f} MB available."
+            )
+        recommendations.append(
+            {
+                "id": model.id,
+                "name": model.filename,
+                "runtime": model.runtime,
+                "size_bytes": model.size_bytes,
+                "min_ram_mb": required,
+                "fits": fits,
+                "installed": True,
+                "reason": reason,
+                "source": "installed",
+            }
+        )
+
+    for item in MODEL_CATALOG:
+        if item["id"] in installed_ids:
+            continue
+        ram_gb = item.get("recommended_ram_gb")
+        required = float(ram_gb) * 1024.0 if ram_gb else None
+        if required is None or available is None:
+            fits = None
+            reason = "This entry declares no RAM requirement."
+        else:
+            fits = available * headroom >= required
+            reason = f"Declared requirement {required:.0f} MB; {available:.0f} MB available."
+        recommendations.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "runtime": "ollama",
+                "size_bytes": item.get("size_bytes"),
+                "min_ram_mb": required,
+                "fits": fits,
+                "installed": False,
+                "reason": reason,
+                "source": "catalog",
+                "downloadable": True,
+            }
+        )
+
+    for item in _engine_catalog_items():
+        if any(existing["id"] == item["id"] for existing in recommendations):
+            continue
+        installed = item["filename"] in installed_filenames
+        required = item.get("recommended_ram_gb") * 1024 if item.get("recommended_ram_gb") else None
+        if required is None or available is None:
+            fits = None
+            reason = "This entry declares no RAM requirement."
+        else:
+            fits = available * headroom >= required
+            reason = f"Declared requirement {required:.0f} MB; {available:.0f} MB available."
+        recommendations.append(
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "runtime": item.get("format", "GGUF"),
+                "size_bytes": item.get("size_bytes"),
+                "min_ram_mb": required,
+                "fits": fits,
+                "installed": installed,
+                "reason": reason,
+                "source": item.get("source", "huggingface"),
+                "downloadable": True,
+                "repo_id": item.get("repo_id"),
+                "filename": item.get("filename"),
+                "sha256": item.get("sha256"),
+            }
+        )
+
+    def _sort_key(entry: dict[str, Any]):
+        fits_rank = 0 if entry["fits"] is True else (1 if entry["fits"] is None else 2)
+        installed_rank = 0 if entry["installed"] else 1
+        return (fits_rank, installed_rank, -(entry["size_bytes"] or 0))
+
+    recommendations.sort(key=_sort_key)
+    recommended_id = next(
+        (entry["id"] for entry in recommendations if entry["fits"] and entry["installed"]),
+        None,
+    )
+    if recommended_id is None:
+        recommended_id = next(
+            (entry["id"] for entry in recommendations if entry["fits"] is True),
+            None,
+        )
+
+    return {
+        "measured": {
+            "ram_total_mb": total,
+            "ram_available_mb": available,
+            "gpu_name": snap.gpu.name,
+            "gpu_vram_mb": vram,
+            "gpu_telemetry_available": snap.gpu.supported,
+        },
+        "recommended_id": recommended_id,
+        "recommendations": recommendations,
     }
 
 
@@ -289,17 +480,19 @@ async def _run_ollama_pull(model_name: str):
                         except Exception:
                             pass
             else:
-                # High-fidelity progressive download simulation when Ollama offline
-                for pct in range(10, 101, 15):
-                    await asyncio.sleep(0.4)
-                    _PULL_STATUS[model_name] = {
-                        "status": "downloading" if pct < 100 else "completed",
-                        "percentage": pct,
-                        "completed_bytes": int(1024 * 1024 * 500 * (pct / 100)),
-                        "total_bytes": 1024 * 1024 * 500,
-                        "message": f"Downloading model weights ({pct}%)...",
-                        "error": None,
-                    }
+                # No runtime to pull from. Report it instead of animating fake progress.
+                _PULL_STATUS[model_name] = {
+                    "status": "failed",
+                    "percentage": 0,
+                    "completed_bytes": 0,
+                    "total_bytes": 0,
+                    "message": (
+                        f"Ollama is not reachable at {ollama_url}. "
+                        "Start it with 'ollama serve' or install a GGUF model locally."
+                    ),
+                    "error": "runtime_unavailable",
+                }
+                return
 
         _PULL_STATUS[model_name] = {
             "status": "completed",
@@ -308,18 +501,13 @@ async def _run_ollama_pull(model_name: str):
             "error": None,
         }
 
-        # Add to cached models
+        # Refresh the inventory from the runtime instead of inventing metadata.
         global _CACHED_MODELS
-        if not any(m["name"] == model_name for m in _CACHED_MODELS):
-            _CACHED_MODELS.append({
-                "name": model_name,
-                "size_bytes": 1024 * 1024 * 600,
-                "format": "gguf",
-                "family": model_name.split(":")[0],
-                "parameter_size": "1B",
-                "quantization_level": "Q4_K_M",
-                "runtime": "ollama",
-            })
+        _CACHED_MODELS.clear()
+        try:
+            await list_models()
+        except Exception as exc:
+            logger.debug("Post-pull inventory refresh failed: %s", exc)
 
     except Exception as e:
         logger.error("Failed to pull model %s: %s", model_name, e)
@@ -331,21 +519,162 @@ async def _run_ollama_pull(model_name: str):
         }
 
 
+async def _run_gguf_download(entry) -> None:
+    """Download a catalog entry through the canonical model manager."""
+    model_id = entry.id
+    expected_total = entry.total_size_bytes or 0
+    _PULL_STATUS[model_id] = {
+        "status": "downloading",
+        "percentage": 0,
+        "completed_bytes": 0,
+        "total_bytes": expected_total,
+        "message": f"Downloading {entry.display_name}…",
+        "error": None,
+    }
+
+    def progress(downloaded: int, total: int) -> None:
+        total_bytes = total or expected_total
+        pct = round(downloaded / total_bytes * 100, 1) if total_bytes else 0.0
+        _PULL_STATUS[model_id] = {
+            "status": "downloading",
+            "percentage": min(pct, 99.9),
+            "completed_bytes": downloaded,
+            "total_bytes": total_bytes,
+            "message": f"Downloading… {pct:.1f}%",
+            "error": None,
+        }
+
+    try:
+        from racon.services.engine_service import get_engine
+
+        result = await get_engine().models.download(entry, progress=progress)
+        _PULL_STATUS[model_id] = {
+            "status": "completed",
+            "percentage": 100,
+            "completed_bytes": result.model.size_bytes,
+            "total_bytes": result.model.size_bytes,
+            "message": "Downloaded, SHA-256 verified and installed.",
+            "error": None,
+            "verified": result.verified,
+            "path": str(result.model.path),
+        }
+        logger.info("Installed %s from %s", model_id, entry.download_url)
+    except Exception as exc:
+        logger.error("GGUF download failed for %s: %s", model_id, exc)
+        _PULL_STATUS[model_id] = {
+            "status": "failed",
+            "percentage": 0,
+            "completed_bytes": 0,
+            "total_bytes": expected_total,
+            "message": f"Download failed: {exc}",
+            "error": str(exc),
+        }
+
+
 @router.post("/pull")
 async def pull_model(req: PullModelRequest, background_tasks: BackgroundTasks):
-    """Trigger real background model download using Ollama or GGUF downloader."""
+    """Trigger a real model download.
+
+    Entries with an HTTPS artifact (Hugging Face or operator catalog) go through the model
+    manager, which verifies SHA-256. Ollama tags are delegated to the local daemon.
+    """
     model_name = req.model_name.strip()
     if not model_name:
         raise HTTPException(status_code=400, detail="model_name is required")
 
-    # Launch background pull task
-    background_tasks.add_task(_run_ollama_pull, model_name)
+    from racon.models.catalog import build_catalog, find_entry
 
+    entry = find_entry(build_catalog(), model_name)
+    if entry is not None and entry.download_url:
+        if not entry.files or not entry.files[0].sha256:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'{model_name}' has no SHA-256; refusing an unverified download.",
+            )
+        background_tasks.add_task(_run_gguf_download, entry)
+        return {
+            "status": "initiated",
+            "model_name": model_name,
+            "message": f"Downloading {entry.display_name}",
+            "source": entry.source,
+        }
+
+    if entry is not None and not entry.download_url and entry.source == "builtin":
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{model_name}' is a local-only model. Import the GGUF file instead.",
+        )
+
+    background_tasks.add_task(_run_ollama_pull, model_name)
     return {
         "status": "initiated",
         "model_name": model_name,
         "message": f"Model download started for {model_name}",
     }
+
+
+class HfInstallRequest(BaseModel):
+    repo_id: str = Field(..., min_length=3, max_length=200)
+    filename: str = Field(..., min_length=5, max_length=512)
+    revision: str = Field(default="main", max_length=64)
+    model_id: Optional[str] = Field(default=None, max_length=128)
+
+
+@router.get("/hf/files")
+async def hf_list_files(
+    repo_id: str = Query(..., description="Hugging Face repository, e.g. owner/name"),
+    revision: str = Query("main", max_length=64),
+):
+    """List GGUF artifacts in a public or token-authorized Hugging Face repository."""
+    from racon.models.huggingface import HuggingFaceClient, HuggingFaceError
+
+    try:
+        files = await HuggingFaceClient().list_gguf_files(repo_id, revision)
+    except HuggingFaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"repo_id": repo_id, "revision": revision, "files": [f.to_dict() for f in files]}
+
+
+@router.post("/hf/install")
+async def hf_install(req: HfInstallRequest, background_tasks: BackgroundTasks):
+    """Install a specific GGUF file from Hugging Face after verifying its Hub SHA-256."""
+    from racon.models.huggingface import HuggingFaceClient, HuggingFaceError, build_entry
+
+    try:
+        files = await HuggingFaceClient().list_gguf_files(req.repo_id, req.revision)
+    except HuggingFaceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    match = next(
+        (item for item in files if item.path == req.filename or item.filename == req.filename),
+        None,
+    )
+    if match is None:
+        raise HTTPException(status_code=404, detail=f"'{req.filename}' is not a GGUF file in this repository")
+    if not match.sha256:
+        raise HTTPException(
+            status_code=422,
+            detail="Hugging Face did not report a SHA-256 for this file; refusing an unverified download.",
+        )
+
+    entry = build_entry(match, model_id=req.model_id)
+    background_tasks.add_task(_run_gguf_download, entry)
+    return {
+        "status": "initiated",
+        "model_id": entry.id,
+        "repo_id": match.repo_id,
+        "filename": match.filename,
+        "size_bytes": match.size_bytes,
+        "sha256": match.sha256,
+    }
+
+
+@router.get("/hf/whoami")
+async def hf_whoami():
+    """Report whether a Hugging Face token is configured, without revealing it."""
+    from racon.models.huggingface import HuggingFaceClient
+
+    return await HuggingFaceClient().whoami()
 
 
 @router.get("/pull/status")
@@ -362,68 +691,50 @@ async def get_pull_status(model_name: str = Query(..., description="Model ID to 
 
 @router.post("/infer")
 async def run_inference(req: InferenceRequest):
-    """Execute inference request using local Ollama if online, or simulated inference engine."""
+    """Execute inference through the real local engine.
+
+    Returns a structured error when no runtime can serve the model. No simulated reply is
+    ever produced.
+    """
+    from racon.runtime.types import ChatMessage, RaconRuntimeError
+    from racon.services.engine_service import get_engine
+
     start_time = time.monotonic()
-    ollama_url = settings.ollama_url.rstrip("/")
     db = get_database()
 
+    messages = []
+    if req.system_prompt:
+        messages.append(ChatMessage(role="system", content=req.system_prompt))
+    messages.append(ChatMessage(role="user", content=req.prompt))
+
     try:
-        payload = {
-            "model": req.model_name,
-            "prompt": req.prompt,
-            "stream": False,
-            "system": req.system_prompt or "",
-            "options": {
-                "temperature": req.temperature,
-                "num_predict": req.max_tokens,
-            },
-        }
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(f"{ollama_url}/api/generate", json=payload)
-            if resp.status_code == 200:
-                data = resp.json()
-                elapsed_ms = (time.monotonic() - start_time) * 1000
-                eval_count = data.get("eval_count", 0)
-                prompt_eval_count = data.get("prompt_eval_count", 0)
-                eval_duration_ns = data.get("eval_duration", 1)
-                tokens_per_sec = (eval_count / (eval_duration_ns / 1e9)) if eval_duration_ns else 0.0
+        result = await get_engine().chat(
+            messages,
+            model=req.model_name,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+        )
+    except RaconRuntimeError as exc:
+        db.log_audit(
+            "INFERENCE_FAILED",
+            f"Inference on {req.model_name} failed: {exc.code}",
+            level="WARN",
+        )
+        return JSONResponse(status_code=exc.http_status, content=exc.to_dict())
 
-                result_text = data.get("response", "")
-                db.log_audit("INFERENCE_LIVE", f"Live inference on {req.model_name} completed ({eval_count} tokens)")
-
-                return {
-                    "model": req.model_name,
-                    "prompt": req.prompt,
-                    "response": result_text,
-                    "input_tokens": prompt_eval_count,
-                    "output_tokens": eval_count,
-                    "duration_ms": round(elapsed_ms, 1),
-                    "tokens_per_second": round(tokens_per_sec, 1),
-                    "simulated": False,
-                }
-    except Exception as e:
-        logger.info("Ollama live inference unavailable (%s); executing high-fidelity simulation", e)
-
-    elapsed_ms = (time.monotonic() - start_time) * 1000 + 45.0
-    sim_output_tokens = min(max(len(req.prompt.split()) * 3, 20), req.max_tokens)
-    sim_input_tokens = len(req.prompt.split())
-    sim_tps = 28.5
-
-    simulated_reply = (
-        f"[RACoN Simulation] Processed '{req.prompt.strip()[:60]}...' using model {req.model_name}. "
-        f"Resource allocation: Local Node (CPU). Execution verified successfully."
+    elapsed_ms = (time.monotonic() - start_time) * 1000
+    db.log_audit(
+        "INFERENCE_LIVE",
+        f"Live inference on {req.model_name} completed ({result.usage.completion_tokens} tokens)",
     )
-
-    db.log_audit("INFERENCE_SIM", f"Simulated inference on {req.model_name} completed")
 
     return {
         "model": req.model_name,
         "prompt": req.prompt,
-        "response": simulated_reply,
-        "input_tokens": sim_input_tokens,
-        "output_tokens": sim_output_tokens,
+        "response": result.text,
+        "input_tokens": result.usage.prompt_tokens,
+        "output_tokens": result.usage.completion_tokens,
         "duration_ms": round(elapsed_ms, 1),
-        "tokens_per_second": sim_tps,
-        "simulated": True,
-        "note": "Live Ollama was not responding on 127.0.0.1:11434; returned simulated response.",
+        "tokens_per_second": result.generation_tokens_per_second,
+        "simulated": False,
     }

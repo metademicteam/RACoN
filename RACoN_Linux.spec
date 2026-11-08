@@ -36,6 +36,36 @@ def find_llama_dir() -> Path:
 
 LLAMA_DIR = find_llama_dir()
 
+# PySide6's Qt platform plugins (platforms/libqxcb.so and friends) are required for the desktop
+# app to start. PyInstaller's stock PySide6 hook drops them when the build host cannot resolve
+# their X11 dependencies (a headless container), which produces:
+#     qt.qpa.plugin: Could not find the Qt platform plugin "xcb" in ""
+# Collect them explicitly as binaries so their shared-library dependencies are analyzed too.
+import PySide6
+
+
+def qt_plugins():
+    """Only the Qt platform plugins the app needs.
+
+    Collecting every PySide6 plugin drags in QtWebEngine, Quick3D and the PDF stack (200+ MB)
+    through their dependencies. RACoN uses Widgets on X11, so the platform plugins are enough;
+    PNG icons are handled inside QtGui.
+    """
+    root = Path(PySide6.__file__).resolve().parent / "Qt" / "plugins"
+    if not root.is_dir():
+        return []
+    found = []
+    for plugin in sorted((root / "platforms").glob("*.so")):
+        found.append((str(plugin), str(Path("PySide6") / "Qt" / "plugins" / "platforms")))
+    return found
+
+
+QT_PLUGINS = qt_plugins()
+if not any("libqxcb.so" in src for src, _ in QT_PLUGINS):
+    raise SystemExit(
+        "PySide6 libqxcb.so not found. Install PySide6 in the build environment before building."
+    )
+
 
 def find_libgomp() -> Path | None:
     """Locate libgomp.so.1 so rpc-server runs on a stock Ubuntu without libgomp1."""
@@ -77,6 +107,8 @@ else:
 datas = [
     ("racon/scenarios/sample_scenarios.json", "racon/scenarios"),
     ("apps/desktop/icon.png", "apps/desktop"),
+    ("apps/desktop/dist", "apps/desktop/dist"),
+    ("backend/racon/admin_ui", "backend/racon/admin_ui"),
 ]
 
 hiddenimports = [
@@ -137,12 +169,47 @@ hiddenimports = [
     "racon.runtime.distributed_gguf",
     "racon.runtime.rpc_worker",
     "racon.runtime.storage_guard",
+    "racon.runtime.base",
+    "racon.runtime.types",
+    "racon.runtime.registry",
+    "racon.runtime.llamacpp",
+    "racon.runtime.ollama",
+    "racon.models",
+    "racon.models.catalog",
+    "racon.models.manager",
+    "racon.models.estimate",
+    "racon.models.huggingface",
+    "racon.services.engine_service",
+    "racon.storage.migrations",
+    "racon.settings",
+    "racon.logging_setup",
+    "racon.desktop",
+    "racon.cloud",
+    "racon.cloud.supabase",
+    "backend",
+    "backend.racon",
+    "backend.racon.api",
+    "backend.racon.api.app",
+    "backend.racon.api.routes_engine",
+    "backend.racon.api.routes_cloud",
+    "backend.racon.api.routes_worker",
+    "backend.racon.api.routes_admin",
+    "backend.racon.api.coordinator_state",
+    "backend.racon.storage.models",
+    "backend.racon.orchestration",
+    "backend.racon.orchestration.service",
+    "backend.racon.orchestration.planner",
+    "backend.racon.orchestration.executor",
+    "backend.racon.orchestration.selector",
+    "backend.racon.orchestration.synthesizer",
+    "backend.racon.orchestration.schemas",
+    "backend.racon.orchestration.dag",
 ]
 
 a = Analysis(
     ["racon/__main__.py"],
     pathex=["."],
-    binaries=llama_binaries,
+    binaries=llama_binaries + QT_PLUGINS,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

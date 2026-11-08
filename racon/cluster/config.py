@@ -39,6 +39,12 @@ class ClusterConfig:
     kv_cache_type: str = "q8_0"  # q8_0, q4_0, or f16 for reduced attention cache memory
     flash_attn: bool = False  # Enable flash attention when supported by backend
     total_layers: Optional[int] = None  # read from GGUF metadata when unset
+    max_worker_rtt_ms: float = 50.0  # exclude workers slower than this from layer splitting
+    allow_slow_workers: bool = False  # force layer splitting over high-latency links
+    rpc_startup_timeout_s: float = 300.0  # hard cap for an RPC head load before head-only fallback
+    rpc_stall_timeout_s: float = 45.0  # abort an RPC load when the head log stops making progress
+    max_worker_layers: int = 0  # cap layers per worker so the first load fits the timeout (0 = no cap)
+    worker_layer_policy: str = "auto"  # auto: split only if the head cannot hold the model; always; never
 
 
 def default_cluster_dir() -> Path:
@@ -71,10 +77,21 @@ def load_config(path: Optional[str | Path] = None) -> ClusterConfig:
     if not config_path.exists():
         raise FileNotFoundError(f"Cluster config not found: {config_path}")
 
-    data = json.loads(config_path.read_text(encoding="utf-8"))
+    # utf-8-sig tolerates the BOM that Notepad and PowerShell add to hand-edited configs.
+    data = json.loads(config_path.read_text(encoding="utf-8-sig"))
     if not data.get("model_path"):
         raise ValueError("Cluster config requires 'model_path'")
 
     fields = {k: v for k, v in data.items() if k != "workers"}
     workers = [_parse_worker(w, i) for i, w in enumerate(data.get("workers", []))]
+
+    policy = str(fields.get("worker_layer_policy", "auto")).lower()
+    if policy not in ("auto", "always", "never"):
+        raise ValueError(
+            "worker_layer_policy must be 'auto', 'always' or 'never' "
+            f"(got '{fields.get('worker_layer_policy')}')"
+        )
+    fields["worker_layer_policy"] = policy
+    if int(fields.get("max_worker_layers", 0)) < 0:
+        raise ValueError("max_worker_layers must be 0 (no cap) or a positive layer count")
     return ClusterConfig(workers=workers, **fields)

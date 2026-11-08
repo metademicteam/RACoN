@@ -1,6 +1,7 @@
 """RACoN Companion CLI — Typer-based command line interface."""
 from __future__ import annotations
 
+import os
 import sys
 import json
 import httpx
@@ -34,7 +35,8 @@ app.add_typer(jobs_app, name="jobs")
 
 console = Console()
 DEFAULT_API_URL = "http://127.0.0.1:8765"
-DEFAULT_TOKEN = "racon-local-dev-token"
+# Operator tool: prefer the admin token, with the client token as a fallback.
+DEFAULT_TOKEN = os.environ.get("AUTH_TOKEN") or os.environ.get("RACON_CLIENT_TOKEN", "")
 
 
 def get_client(api_url: str = DEFAULT_API_URL, token: str = DEFAULT_TOKEN) -> httpx.Client:

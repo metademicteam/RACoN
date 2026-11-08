@@ -76,18 +76,29 @@ if (Get-Process cloudflared -ErrorAction SilentlyContinue) {
     }
 }
 
-# 3. Coordinator (worker ingress + admin API)
-if (Test-Port 8765) {
-    Write-Host "[ok] Coordinator already listening on 8765"
+# 3. Unified control plane: admin dashboard + API + worker ingress on 8765.
+#    The old racon.coordinator.server app has no /admin route, so the public Funnel URL
+#    returned a FastAPI 404 even when it was running. Never start it here.
+$backendScript = Join-Path $root "scripts\start_backend.ps1"
+if (Test-Path $backendScript) {
+    & $backendScript -Port 8765
 } else {
-    Start-Process -FilePath $python -ArgumentList @("-m", "racon.coordinator.server") `
-        -WorkingDirectory $root -WindowStyle Hidden `
-        -RedirectStandardOutput (Join-Path $logDir "coordinator.log") `
-        -RedirectStandardError (Join-Path $logDir "coordinator.log.err") | Out-Null
-    if (Wait-Http "http://127.0.0.1:8765/health" $ReadyTimeoutSeconds) {
-        Write-Host "[ok] Coordinator started"
+    Write-Warning "Missing $backendScript"
+}
+
+# 3b. Watchdog: restart the backend and re-assert the Funnel target after logon.
+$watchScript = Join-Path $root "scripts\watch_backend.ps1"
+$watchRunning = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -match "watch_backend\.ps1" } |
+    Select-Object -First 1
+if (Test-Path $watchScript) {
+    if (-not $watchRunning) {
+        Start-Process -FilePath "powershell.exe" `
+            -ArgumentList @("-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File", $watchScript) `
+            -WorkingDirectory $root -WindowStyle Hidden | Out-Null
+        Write-Host "[ok] Backend watchdog started"
     } else {
-        Write-Warning "Coordinator did not become healthy; see $logDir\coordinator.log.err"
+        Write-Host "[ok] Backend watchdog already running"
     }
 }
 

@@ -141,25 +141,65 @@ def test_logs_endpoint(client):
 
 
 def test_openai_compatibility_models(client):
-    """Verify OpenAI-compatible /v1/models endpoint."""
+    """Verify OpenAI-compatible /v1/models endpoint reports real catalog and installed models."""
     r = client.get("/v1/models")
     assert r.status_code == 200
     data = r.json()
     assert data["object"] == "list"
     assert len(data["data"]) >= 1
     model_ids = [m["id"] for m in data["data"]]
-    assert "gemma-3-1b" in model_ids
+    assert "gemma-3-1b-racon" in model_ids
+    # Every advertised entry states whether the bytes are actually present.
+    assert all("installed" in m["racon"] for m in data["data"])
 
 
-def test_openai_compatibility_chat_completions(client):
-    """Verify OpenAI-compatible /v1/chat/completions endpoint."""
+class _StubEngine:
+    """Minimal engine double: proves the route wiring without a real model runtime."""
+
+    runtime_name = "llama_cpp"
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+
+    async def chat(self, messages, **kwargs):
+        if self.fail:
+            from racon.runtime.types import RuntimeUnavailableError
+
+            raise RuntimeUnavailableError("llama-server is not running", {"hint": "install llama.cpp"})
+        from racon.runtime.types import ChatResult, ChatUsage
+
+        return ChatResult(
+            text="real answer from the runtime",
+            model=kwargs.get("model", "test-model"),
+            runtime="llama_cpp",
+            usage=ChatUsage(prompt_tokens=7, completion_tokens=5),
+            duration_ms=120.0,
+            time_to_first_token_ms=30.0,
+            finish_reason="stop",
+        )
+
+    async def chat_stream(self, messages, **kwargs):
+        from racon.runtime.types import ChatChunk, ChatUsage
+
+        for piece in ("real ", "streamed ", "answer"):
+            yield ChatChunk(delta=piece)
+        yield ChatChunk(done=True, finish_reason="stop", usage=ChatUsage(4, 3))
+
+
+def _patch_engine(monkeypatch, engine):
+    from backend.racon.api import routes_engine
+
+    monkeypatch.setattr(routes_engine, "get_engine", lambda: engine)
+
+
+def test_openai_compatibility_chat_completions(client, monkeypatch):
+    """Verify /v1/chat/completions returns the runtime's real text and measured usage."""
+    _patch_engine(monkeypatch, _StubEngine())
     r = client.post(
         "/v1/chat/completions",
         json={
-            "model": "gemma-3-1b",
-            "messages": [
-                {"role": "user", "content": "Hello RACoN!"}
-            ],
+            "model": "gemma-3-1b-racon",
+            "messages": [{"role": "user", "content": "Hello RACoN!"}],
             "max_tokens": 16,
             "stream": False,
         },
@@ -167,7 +207,105 @@ def test_openai_compatibility_chat_completions(client):
     assert r.status_code == 200
     data = r.json()
     assert data["object"] == "chat.completion"
-    assert len(data["choices"]) == 1
-    assert data["choices"][0]["message"]["role"] == "assistant"
-    assert len(data["choices"][0]["message"]["content"]) > 0
-    assert "usage" in data
+    assert data["choices"][0]["message"]["content"] == "real answer from the runtime"
+    assert data["usage"]["completion_tokens"] == 5
+    assert data["racon"]["runtime"] == "llama_cpp"
+
+
+def test_chat_completions_reports_runtime_failure_instead_of_faking_output(client, monkeypatch):
+    """A missing runtime must surface as a structured 503, never a canned assistant reply."""
+    _patch_engine(monkeypatch, _StubEngine(fail=True))
+    r = client.post(
+        "/v1/chat/completions",
+        json={"model": "gemma-3-1b-racon", "messages": [{"role": "user", "content": "hi"}]},
+    )
+    assert r.status_code == 503
+    body = r.json()
+    assert body["error"]["code"] == "runtime_unavailable"
+    assert "choices" not in body
+
+
+def test_chat_completions_auto_uses_smart_router(client, monkeypatch):
+    from backend.racon.api import routes_engine
+    from backend.racon.orchestration.model_router import ModelProfile
+
+    async def fake_profiles(_engine):
+        return [
+            ModelProfile(
+                name="test-model",
+                capabilities=frozenset(
+                    {"text_generation", "chat", "info", "creative", "code"}
+                ),
+            )
+        ]
+
+    monkeypatch.setattr(routes_engine, "build_profiles_from_engine", fake_profiles)
+    _patch_engine(monkeypatch, _StubEngine())
+
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "auto",
+            "messages": [{"role": "user", "content": "write python code to sort a list"}],
+            "max_tokens": 16,
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["choices"][0]["message"]["content"] == "real answer from the runtime"
+    router = body["racon"]["router"]
+    assert router["selected_model"] == "test-model"
+    assert router["classification"]["category"] == "code"
+
+
+def test_scheduler_route_preview(client, monkeypatch):
+    from backend.racon.api import routes_scheduler
+    from backend.racon.orchestration.model_router import ModelProfile
+
+    async def fake_profiles(_engine):
+        return [
+            ModelProfile(
+                name="code-model",
+                capabilities=frozenset({"text_generation", "chat", "code"}),
+            )
+        ]
+
+    monkeypatch.setattr(routes_scheduler, "build_profiles_from_engine", fake_profiles)
+    response = client.post(
+        "/api/v1/scheduler/route",
+        json={"prompt": "write a python function to reverse a list"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["selected_model"] == "code-model"
+    assert data["classification"]["category"] == "code"
+
+
+def test_chat_completions_streams_sse(client, monkeypatch):
+    """Streaming must emit real deltas and terminate with [DONE]."""
+    _patch_engine(monkeypatch, _StubEngine())
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "gemma-3-1b-racon",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": True,
+        },
+    ) as response:
+        assert response.status_code == 200
+        body = "".join(response.iter_text())
+    assert "real " in body
+    assert "data: [DONE]" in body
+    assert '"usage"' in body
+
+
+def test_v1_surface_requires_authentication():
+    """The OpenAI-compatible surface is authenticated, not open on the loopback port."""
+    from fastapi.testclient import TestClient
+
+    from backend.racon.api.app import app
+
+    with TestClient(app) as anonymous:
+        assert anonymous.get("/v1/models").status_code == 401
+

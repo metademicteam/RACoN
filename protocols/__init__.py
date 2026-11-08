@@ -17,6 +17,7 @@ from protocols.models import (
     HeartbeatAck,
     TaskEnvelope,
     TaskResultEnvelope,
+    TaskProgressMessage,
     TaskCancelMessage,
 )
 from protocols.crypto import (
@@ -50,6 +51,7 @@ __all__ = [
     "HeartbeatAck",
     "TaskEnvelope",
     "TaskResultEnvelope",
+    "TaskProgressMessage",
     "TaskCancelMessage",
     "generate_keypair",
     "private_key_to_bytes",

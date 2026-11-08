@@ -2,7 +2,7 @@
 
 RACoN runs on Ubuntu (x86_64) as a desktop app or as a headless cluster worker. The PyInstaller
 bundle can only run on the glibc version of the machine that built it or newer, so build on the
-oldest Ubuntu release you need to support. The published 1.0.6 artifacts were built on Ubuntu
+oldest Ubuntu release you need to support. The published 1.1.0 artifacts were built on Ubuntu
 24.04 and require glibc 2.38 or newer.
 
 Windows and Ubuntu nodes use the same coordinator, enrollment flow, protocol and scheduler; a
@@ -31,6 +31,13 @@ sudo apt install -y build-essential cmake git python3 python3-venv python3-pip p
 ```
 
 `pyinstaller` and the Python dependencies are installed by the build script into `.venv-linux`.
+
+The build host also needs the Qt/X11 runtime libraries above. PyInstaller analyzes the PySide6
+platform plugins with `ldd`; when their dependencies are missing (a bare CI container), it drops
+`platforms/libqxcb.so` and the installed app fails with
+`Could not find the Qt platform plugin "xcb"`. `RACoN_Linux.spec` now adds the plugins explicitly,
+and `racon/__main__.py` sets `QT_QPA_PLATFORM_PLUGIN_PATH` in frozen builds, but the build host
+still needs the libraries to produce a working `libqxcb.so` dependency set.
 
 ### llama.cpp
 
@@ -194,7 +201,7 @@ Publishing a new Windows installer on the Windows host keeps the Linux entry:
   `Unavailable` rather than being fabricated.
 - The desktop bundle requires Qt/X11 or Wayland libraries. Ubuntu Server nodes should use
   `--headless`.
-- The `.deb` requires the build host's glibc or newer. The published 1.0.6 package targets
+- The `.deb` requires the build host's glibc or newer. The published 1.1.0 package targets
   Ubuntu 24.04+ (glibc 2.38) and also needs `libxcb-cursor0`. Build on Ubuntu 22.04 to ship a
   22.04-compatible release.
 - `libgomp.so.1` is bundled next to the llama.cpp binaries, so a stock Ubuntu installation does

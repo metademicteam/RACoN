@@ -36,6 +36,7 @@ class TrustState(str, Enum):
 
 class TaskType(str, Enum):
     TEXT_COMPLETION = "text_completion"
+    CHAT_COMPLETION = "chat_completion"
     EMBEDDING = "embedding"
     BENCHMARK_PROBE = "benchmark_probe"
     DISTRIBUTED_INFERENCE = "distributed_inference"
@@ -78,6 +79,10 @@ class EnrollmentRequest(BaseModel):
     capabilities: HardwareCapabilities
     protocol_version: str = Field(default=PROTOCOL_VERSION, max_length=16)
     timestamp: float = Field(default_factory=time.time)
+    # Model inventory is telemetry, not an identity claim. It is added to the signed
+    # payload only when present, so 1.1 agents (empty lists) keep their original signature.
+    models: List[str] = Field(default_factory=list, max_length=64)
+    features: List[str] = Field(default_factory=list, max_length=16)
     signature: str = Field(..., min_length=128, max_length=128)
 
     def payload_bytes(self) -> bytes:
@@ -91,6 +96,10 @@ class EnrollmentRequest(BaseModel):
             "protocol_version": self.protocol_version,
             "timestamp": self.timestamp,
         }
+        if self.models:
+            data["models"] = list(self.models)
+        if self.features:
+            data["features"] = list(self.features)
         return canonicalize_json(data)
 
 
@@ -113,6 +122,11 @@ class HeartbeatMessage(BaseModel):
     cpu_util_pct: float = Field(..., ge=0.0, le=100.0)
     ram_available_mb: float = Field(..., ge=0.0)
     active_tasks: List[str] = Field(default_factory=list, max_length=64)
+    # Live model inventory. ``models_reported`` distinguishes "the worker has no models"
+    # from "this agent does not report inventory"; only reported heartbeats are added to
+    # the signed payload, so older agents keep their original signature.
+    models: List[str] = Field(default_factory=list, max_length=64)
+    models_reported: bool = False
     signature: str = Field(..., min_length=128, max_length=128)
 
     def payload_bytes(self) -> bytes:
@@ -125,6 +139,9 @@ class HeartbeatMessage(BaseModel):
             "ram_available_mb": self.ram_available_mb,
             "active_tasks": sorted(self.active_tasks),
         }
+        if self.models_reported:
+            data["models"] = list(self.models)
+            data["models_reported"] = True
         return canonicalize_json(data)
 
 
@@ -181,6 +198,22 @@ class TaskResultEnvelope(BaseModel):
             "error": self.error,
         }
         return canonicalize_json(data)
+
+
+class TaskProgressMessage(BaseModel):
+    """A streamed delta from a worker for an in-flight chat task.
+
+    Progress batches are authenticated by the session token and the assigned node id. The
+    terminal result is still signed by the worker; progress is a latency optimisation.
+    """
+
+    node_id: str = Field(..., min_length=8, max_length=64)
+    task_id: str = Field(..., min_length=8, max_length=64)
+    session_token: str = Field(..., min_length=16, max_length=256)
+    seq: int = Field(..., ge=0)
+    delta: Dict[str, Any] = Field(default_factory=dict)
+    finish_reason: Optional[str] = Field(None, max_length=64)
+    timestamp: float = Field(default_factory=time.time)
 
 
 class TaskCancelMessage(BaseModel):

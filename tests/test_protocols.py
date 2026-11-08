@@ -146,6 +146,39 @@ def test_task_envelope_signed_by_coordinator():
     assert verify_signature(coord_pub, envelope.payload_bytes(), envelope.coordinator_signature) is True
 
 
+def test_heartbeat_model_inventory_is_signed_only_when_reported():
+    private, public = generate_keypair()
+    public_hex = public_key_to_hex(public)
+    base = {
+        "node_id": "node-inventory1",
+        "timestamp": time.time(),
+        "nonce": "0123456789abcdef0123456789abcdef",
+        "cpu_util_pct": 10.0,
+        "ram_available_mb": 4096.0,
+        "active_tasks": [],
+        "signature": "0" * 128,
+    }
+
+    legacy = HeartbeatMessage(**base)
+    assert "models" not in json.loads(legacy.payload_bytes())
+    legacy.signature = sign_message(private, legacy.payload_bytes())
+    assert verify_signature(
+        load_public_key_from_hex(public_hex), legacy.payload_bytes(), legacy.signature
+    )
+
+    current = HeartbeatMessage(**base, models=["qwen2.5:0.5b"], models_reported=True)
+    payload = json.loads(current.payload_bytes())
+    assert payload["models"] == ["qwen2.5:0.5b"]
+    assert payload["models_reported"] is True
+    current.signature = sign_message(private, current.payload_bytes())
+    assert verify_signature(
+        load_public_key_from_hex(public_hex), current.payload_bytes(), current.signature
+    )
+
+    empty = HeartbeatMessage(**base, models=[], models_reported=True)
+    assert json.loads(empty.payload_bytes())["models"] == []
+
+
 def test_task_size_limits():
     """Verify serialized envelope is well within the 64 KB limit."""
     coord_priv, coord_pub = generate_keypair()

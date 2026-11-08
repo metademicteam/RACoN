@@ -76,9 +76,35 @@ class NodeCapability(Base):
     gpu_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     gpu_vram_mb: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     runtimes_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    os_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    rpc_endpoint: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    models_json: Mapped[Optional[str]] = mapped_column(Text, default="[]", nullable=True)
+    features_json: Mapped[Optional[str]] = mapped_column(Text, default="[]", nullable=True)
 
     # Relationships
     node: Mapped[Node] = relationship(back_populates="capabilities")
+
+
+class ApiKey(Base):
+    """Hashed API key used by external OpenAI-compatible clients."""
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    scopes: Mapped[str] = mapped_column(String(128), default="inference", nullable=False)
+    rate_limit_per_min: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False
+    )
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class WorkerSession(Base):
@@ -235,3 +261,114 @@ class AuditEvent(Base):
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     severity: Mapped[str] = mapped_column(String(16), default="INFO", nullable=False)
     details_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+
+
+class Job(Base):
+    """A user request orchestrated into a task DAG."""
+
+    __tablename__ = "orchestration_jobs"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    model_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    requested_mode: Mapped[str] = mapped_column(String(16), default="auto", nullable=False)
+    execution_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    planner_mode: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    plan_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    result_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=512, nullable=False)
+    max_parallel_tasks: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    tasks_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tasks_completed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tasks_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    tasks: Mapped[List["JobTask"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+        order_by="JobTask.task_id",
+    )
+    events: Mapped[List["JobEvent"]] = relationship(
+        back_populates="job",
+        cascade="all, delete-orphan",
+    )
+
+
+class JobTask(Base):
+    """One executable node of an orchestration job's DAG."""
+
+    __tablename__ = "orchestration_tasks"
+
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("orchestration_jobs.id", ondelete="CASCADE"), primary_key=True
+    )
+    task_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(String(160), nullable=False, default="")
+    instruction: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    depends_on_json: Mapped[str] = mapped_column(Text, default="[]", nullable=False)
+    state: Mapped[str] = mapped_column(String(24), default="pending", nullable=False)
+    worker_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    output: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    max_tokens: Mapped[int] = mapped_column(Integer, default=512, nullable=False)
+    timeout_s: Mapped[float] = mapped_column(Float, default=180.0, nullable=False)
+    retries: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+    job: Mapped[Job] = relationship(back_populates="tasks")
+
+
+class JobEvent(Base):
+    """Append-only lifecycle event for an orchestration job."""
+
+    __tablename__ = "orchestration_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[str] = mapped_column(
+        String(64), ForeignKey("orchestration_jobs.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False)
+    level: Mapped[str] = mapped_column(String(16), default="info", nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    detail_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+
+    job: Mapped[Job] = relationship(back_populates="events")
+
+
+class RoutingEvent(Base):
+    """Request-routing audit trail: which node talked to which node through the server.
+
+    Every worker/coordinator interaction (enroll, heartbeat, task assignment, claim,
+    report) and every orchestration dispatch writes one row. The admin dashboard reads
+    this table to show the live node-to-node request flow.
+    """
+
+    __tablename__ = "routing_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=func.now(), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(48), nullable=False, index=True)
+    source_node: Mapped[str] = mapped_column(String(128), default="server", nullable=False)
+    target_node: Mapped[str] = mapped_column(String(128), default="server", nullable=False)
+    job_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    task_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    state: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    detail_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)

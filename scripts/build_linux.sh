@@ -76,17 +76,20 @@ else
 fi
 
 echo "==> Building the PyInstaller bundle"
-rm -rf "$ROOT/dist/racon"
+# Use a Linux-only output folder: dist/racon and dist/RACoN are the same directory on a
+# case-insensitive Windows mount and would collide with the Windows PyInstaller bundle.
+LINUX_DIST="$ROOT/dist/linux-build"
+rm -rf "$LINUX_DIST"
 RACON_LLAMA_DIR="$LLAMA_DIR" python -m PyInstaller RACoN_Linux.spec \
     --noconfirm --clean \
-    --distpath "$ROOT/dist" \
+    --distpath "$LINUX_DIST" \
     --workpath "$ROOT/build/linux"
 
 STAGE_NAME="RACoN-linux-${ARCH}-v${VERSION}"
 STAGE="$ROOT/dist/linux/$STAGE_NAME"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-cp -a "$ROOT/dist/racon" "$STAGE/racon"
+cp -a "$LINUX_DIST/racon" "$STAGE/racon"
 cp "$ROOT/packaging/linux/install.sh" "$STAGE/install.sh"
 cp "$ROOT/packaging/linux/racon.desktop" "$STAGE/racon.desktop"
 cp "$ROOT/packaging/linux/racon-worker.service" "$STAGE/racon-worker.service"
@@ -121,7 +124,7 @@ if command -v dpkg-deb >/dev/null 2>&1; then
              "$PKGROOT/usr/share/applications" \
              "$PKGROOT/usr/share/icons/hicolor/256x256/apps" \
              "$PKGROOT/usr/lib/systemd/user"
-    cp -a "$ROOT/dist/racon/." "$PKGROOT/opt/racon/"
+    cp -a "$LINUX_DIST/racon/." "$PKGROOT/opt/racon/"
     cp "$ROOT/apps/desktop/icon.png" "$PKGROOT/usr/share/icons/hicolor/256x256/apps/racon.png"
     cp "$ROOT/packaging/linux/racon.desktop" "$PKGROOT/usr/share/applications/racon.desktop"
     sed -i "s|@EXEC@|/usr/bin/racon|g; s|@ICON@|racon|g" "$PKGROOT/usr/share/applications/racon.desktop"

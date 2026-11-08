@@ -125,19 +125,19 @@ def create_worker_api(
 
     @app.post("/tasks/claim")
     async def claim_task(req: Dict[str, Any]) -> Dict[str, Any]:
-        """Worker checks if a task has been assigned to it."""
+        """Atomically claim one assigned task for this node.
+
+        Claiming transitions the task to ``running`` so it is never delivered twice.
+        """
         node_id = req.get("node_id")
         token = req.get("session_token")
         if not node_id or not token or not registry.authenticate_session(node_id, token):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session credentials")
 
-        # Search for assigned task
-        for t in tasks.list_tasks():
-            if t["node_id"] == node_id and t["state"] == "assigned":
-                task_full = tasks.get_task(t["task_id"])
-                return {"has_task": True, "task": task_full}
-
-        return {"has_task": False, "task": None}
+        task = tasks.claim_task(node_id)
+        if task is None:
+            return {"has_task": False, "task": None}
+        return {"has_task": True, "task": task}
 
     @app.post("/tasks/report")
     async def report_task_result(result: TaskResultEnvelope) -> Dict[str, Any]:

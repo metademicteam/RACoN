@@ -38,6 +38,8 @@ class TaskRecord:
         self.duration_ms: float = 0.0
         self.error: Optional[str] = None
         self.worker_signature: Optional[str] = None
+        self.progress: List[Dict[str, Any]] = []
+        self.last_progress_seq: int = -1
 
 
 class TaskManager:
@@ -122,6 +124,16 @@ class TaskManager:
                 logger.warning("Received result for unknown task %s", result.task_id)
                 return False
 
+            # A result may only come from the node the task was assigned to.
+            if result.node_id != record.envelope.node_id:
+                logger.error(
+                    "Task %s was assigned to %s but %s reported a result",
+                    result.task_id,
+                    record.envelope.node_id,
+                    result.node_id,
+                )
+                return False
+
             if record.state in (TaskState.COMPLETED, TaskState.CANCELLED):
                 logger.warning("Task %s already in terminal state %s", result.task_id, record.state.value)
                 return False
@@ -135,6 +147,69 @@ class TaskManager:
 
         logger.info("Recorded task %s status=%s in %.2f ms", result.task_id, result.status.value, result.execution_time_ms)
         return True
+
+    def record_progress(
+        self,
+        node_id: str,
+        task_id: str,
+        seq: int,
+        delta: Dict[str, Any],
+        finish_reason: Optional[str] = None,
+    ) -> bool:
+        """Store one streamed delta. Rejects duplicate/out-of-order sequences."""
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                return False
+            if record.envelope.node_id != node_id:
+                logger.warning("Progress for %s came from the wrong node %s", task_id, node_id)
+                return False
+            if record.state in (TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED):
+                return False
+            if seq <= record.last_progress_seq:
+                return False
+            record.last_progress_seq = int(seq)
+            record.progress.append(
+                {
+                    "seq": int(seq),
+                    "delta": dict(delta or {}),
+                    "finish_reason": finish_reason,
+                    "timestamp": time.time(),
+                }
+            )
+            if len(record.progress) > 2048:
+                del record.progress[: len(record.progress) - 2048]
+            return True
+
+    def get_progress(self, task_id: str, after_seq: int = -1) -> List[Dict[str, Any]]:
+        with self._lock:
+            record = self._tasks.get(task_id)
+            if record is None:
+                return []
+            return [item for item in record.progress if int(item.get("seq", -1)) > after_seq]
+
+    def claim_task(self, node_id: str) -> Optional[dict]:
+        """Atomically hand one assigned task to a worker and mark it running.
+
+        This is the only transition into ``RUNNING``. A task is delivered once: a second
+        claim observes state ``running`` and receives nothing.
+        """
+        now = time.time()
+        with self._lock:
+            for record in self._tasks.values():
+                if record.envelope.node_id != node_id or record.state != TaskState.ASSIGNED:
+                    continue
+                if record.envelope.expiry and now > record.envelope.expiry:
+                    record.state = TaskState.FAILED
+                    record.error = "Task expired before a worker claimed it."
+                    record.completed_at = now
+                    logger.warning("Task %s expired unclaimed", record.envelope.task_id)
+                    continue
+                record.state = TaskState.RUNNING
+                record.started_at = now
+                logger.info("Task %s claimed by %s", record.envelope.task_id, node_id)
+                return self._record_to_dict(record)
+        return None
 
     def cancel_task(self, task_id: str, reason: str = "Operator cancelled") -> Optional[TaskCancelMessage]:
         """Cancel a pending or running task and generate a signed cancellation message."""
@@ -170,19 +245,29 @@ class TaskManager:
             record = self._tasks.get(task_id)
             if not record:
                 return None
-            return {
-                "task_id": record.envelope.task_id,
-                "node_id": record.envelope.node_id,
-                "task_type": record.envelope.task_type.value,
-                "model_name": record.envelope.model_name,
-                "state": record.state.value,
-                "parameters": record.envelope.parameters,
-                "duration_ms": record.duration_ms,
-                "result_data": record.result_data,
-                "error": record.error,
-                "created_at": record.created_at,
-                "completed_at": record.completed_at,
-            }
+            return self._record_to_dict(record)
+
+    @staticmethod
+    def _record_to_dict(record: TaskRecord) -> dict:
+        envelope = record.envelope
+        return {
+            "task_id": envelope.task_id,
+            "node_id": envelope.node_id,
+            "task_type": envelope.task_type.value,
+            "model_name": envelope.model_name,
+            "parameters": envelope.parameters,
+            "data_class": envelope.data_class.value,
+            "expiry": envelope.expiry,
+            "idempotency_key": envelope.idempotency_key,
+            "coordinator_signature": envelope.coordinator_signature,
+            "state": record.state.value,
+            "duration_ms": record.duration_ms,
+            "result_data": record.result_data,
+            "error": record.error,
+            "created_at": record.created_at,
+            "started_at": record.started_at,
+            "completed_at": record.completed_at,
+        }
 
     def list_tasks(self) -> List[dict]:
         with self._lock:

@@ -9,6 +9,7 @@ from racon.cluster.auth import ApiKeyStore
 from racon.cluster.config import ClusterConfig, WorkerEndpoint, load_config
 from racon.cluster.gateway import create_gateway
 from racon.cluster.head import build_head_command
+from racon.cluster.planner import plan_layers
 
 
 def test_api_key_store_stores_only_digest(tmp_path):
@@ -64,9 +65,14 @@ def test_head_command_includes_rpc_and_hides_nothing_public():
         model_path="m.gguf",
         workers=[WorkerEndpoint("a", "100.1.1.1", 50052), WorkerEndpoint("b", "100.1.1.2", 50052)],
     )
-    cmd = build_head_command(cfg, "llama-server", "secret")
+    plan = plan_layers(
+        26, head_free_mb=8000, worker_free_mb={"a": 8000, "b": 8000},
+        bytes_per_layer_mb=20.0, worker_order=["a", "b"],
+    )
+    cmd = build_head_command(cfg, "llama-server", "secret", plan=plan, active_workers=cfg.workers)
     assert cmd[cmd.index("--host") + 1] == "127.0.0.1"
     assert cmd[cmd.index("--rpc") + 1] == "100.1.1.1:50052,100.1.1.2:50052"
+    assert cmd[cmd.index("-dev") + 1] == "RPC0,RPC1"
     assert "--no-webui" in cmd
 
 
@@ -75,14 +81,29 @@ def test_head_command_without_workers_skips_rpc():
     assert "--rpc" not in cmd
 
 
-def test_head_command_forces_cpu_when_rpc_workers_are_active():
+def test_head_command_offloads_worker_layers_without_head_gpu():
     cfg = ClusterConfig(
         model_path="m.gguf",
         n_gpu_layers=26,
         workers=[WorkerEndpoint("a", "100.1.1.1", 50052)],
     )
-    cmd = build_head_command(cfg, "llama-server", "secret")
-    assert cmd[cmd.index("-ngl") + 1] == "0"
+    plan = plan_layers(
+        26, head_free_mb=8000, worker_free_mb={"a": 8000},
+        bytes_per_layer_mb=20.0, worker_order=["a"],
+    )
+    cmd = build_head_command(cfg, "llama-server", "secret", plan=plan, active_workers=cfg.workers)
+    worker_layers = plan.total_layers - plan.layers_for("head")
+    assert worker_layers > 0
+    assert cmd[cmd.index("-ngl") + 1] == str(worker_layers)
+    assert cmd[cmd.index("-dev") + 1] == "RPC0"
+    assert cmd[cmd.index("-ts") + 1] == "1.0"
+
+
+def test_head_command_never_splits_without_plan():
+    cfg = ClusterConfig(model_path="m.gguf", workers=[WorkerEndpoint("a", "100.1.1.1", 50052)])
+    cmd = build_head_command(cfg, "llama-server", "secret", plan=None, active_workers=cfg.workers)
+    assert "--rpc" not in cmd
+    assert cmd[cmd.index("-ngl") + 1] == str(cfg.n_gpu_layers)
 
 
 def test_head_command_keeps_gpu_without_workers():

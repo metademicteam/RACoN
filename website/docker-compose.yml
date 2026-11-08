@@ -11,7 +11,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: racon-site:0.1.0
+    image: racon-site:0.2.0
     container_name: racon-site
     restart: unless-stopped
     ports:

@@ -67,7 +67,7 @@ def test_discover_hardware_returns_real_telemetry():
     assert snap.ram_available_mb > 0
     assert snap.ram_available_mb <= snap.ram_total_mb
     assert snap.process_memory_mb > 0
-    assert snap.os_name in ("Windows", "Linux", "Darwin")
+    assert snap.os_name.startswith(("Windows", "Linux", "macOS", "Darwin"))
     assert isinstance(snap.to_dict(), dict)
 
 

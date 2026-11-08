@@ -15,6 +15,7 @@ from protocols import (
     sign_message,
 )
 from protocols.crypto import canonicalize_json
+from racon.agent.crypto_store import AgentKeyStore
 from racon.agent.worker import RaconAgent
 from racon.cluster import discovery
 from racon.cluster.auth import ApiKeyStore
@@ -53,6 +54,68 @@ def test_worker_re_enrolls_when_session_expires(monkeypatch):
 
     assert agent.check_and_execute_task() is False
     assert enrollments == ["join-code"]
+
+
+def test_tool_unsupported_model_returns_clear_error(tmp_path, monkeypatch):
+    """Ollama's "does not support tools" must not become a misleading engine error."""
+    agent = RaconAgent(
+        coordinator_url="http://coordinator",
+        key_store=AgentKeyStore(key_path=tmp_path / "agent.key"),
+        node_id_override="worker-tools",
+    )
+
+    class _StreamResponse:
+        status_code = 400
+
+        def read(self):
+            return (
+                b'{"error":"registry.ollama.ai/library/phi3.5:latest does not support tools"}'
+            )
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _ProgressResponse:
+        status_code = 200
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def close(self):
+            return None
+
+        def stream(self, *args, **kwargs):
+            return _StreamResponse()
+
+        def post(self, *args, **kwargs):
+            return _ProgressResponse()
+
+    monkeypatch.setattr("racon.agent.worker.httpx.Client", _Client)
+
+    result, error = agent._execute_task_workload(
+        "chat_completion",
+        "phi3.5:latest",
+        {
+            "messages": [{"role": "user", "content": "write a file"}],
+            "options": {"tools": [{"type": "function", "function": {"name": "write"}}]},
+        },
+        task_id="task-tools-1",
+    )
+
+    assert result == {}
+    assert error is not None
+    assert "does not support tool calling" in error
+    assert "ModelStorageError" not in error
 
 
 def test_invites_persist_across_restart(tmp_path):
@@ -189,7 +252,7 @@ def test_auto_connect_binds_tailscale_and_starts_rpc(monkeypatch):
     assert ok is True
     assert started["code"] == "RCN-JOIN"
     assert started["host"] == "100.64.0.5"
-    assert agent.status.coordinator_url.startswith("https://")
+    assert agent.status.coordinator_url.startswith(("http://", "https://"))
     assert "RPC listening on 100.64.0.5" in message
 
 

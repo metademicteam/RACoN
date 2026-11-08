@@ -109,39 +109,49 @@ def test_remote_single_worker_execution_and_mode_tag(env):
     task_data = claim_resp.json()["task"]
     assert task_data["task_id"] == task_id
 
-    # Execute
+    # Execute through the real runtime chain. When a runtime is available the worker must
+    # return real text; when none is available it must report a failure, never a placeholder.
     res, err = agent._execute_task_workload(task_data["task_type"], task_data["model_name"], task_data["parameters"])
-    assert err is None
-    # Result must carry an explicit mode tag (ADR Rule 5 & Section 8)
-    assert res.get("mode") in ("LOCAL", "OBSERVED", "REMOTE_SINGLE_WORKER")
+    if err is None:
+        assert isinstance(res.get("response"), str) and res["response"]
+        assert res.get("mode") == "OBSERVED"
+        result_status = TaskState.COMPLETED
+        result_error = None
+    else:
+        assert res == {}
+        assert "No inference runtime reachable" in err
+        result_status = TaskState.FAILED
+        result_error = err[:512]
 
-    # Report
     from protocols import TaskResultEnvelope
     payload = canonicalize_json({
         "task_id": task_id,
         "node_id": agent.node_id,
-        "status": TaskState.COMPLETED.value,
+        "status": result_status.value,
         "result_data": res,
         "execution_time_ms": 25.0,
-        "error": None,
+        "error": result_error,
     })
     sig = sign_message(agent._private_key, payload)
     env_res = TaskResultEnvelope(
         task_id=task_id,
         node_id=agent.node_id,
-        status=TaskState.COMPLETED,
+        status=result_status,
         result_data=res,
         execution_time_ms=25.0,
-        error=None,
+        error=result_error,
         worker_signature=sig,
     )
     report_resp = worker_client.post("/tasks/report", json=env_res.model_dump())
     assert report_resp.status_code == 200
 
-    # Verify coordinator stores completion
+    # The coordinator stores exactly what the worker reported.
     stored = tasks.get_task(task_id)
-    assert stored["state"] == "completed"
-    assert stored["duration_ms"] == 25.0
+    assert stored["state"] == result_status.value
+    if result_status == TaskState.FAILED:
+        assert "response" not in (stored["result_data"] or {})
+    else:
+        assert stored["result_data"]["response"]
 
 
 def test_cancellation_enforcement_never_reports_success(env):

@@ -31,7 +31,15 @@ def get_log_dir() -> Path:
 
 
 def get_db_path() -> Path:
-    """Return the SQLite database file path (racon_v2.db)."""
+    """Return the SQLite database file path (racon_v2.db).
+
+    ``RACON_DB_PATH`` overrides the location. Tests set it so they never touch the
+    per-user database: a test process that opened the real file would mark live jobs
+    failed through the interrupted-job recovery that runs on application start.
+    """
+    override = os.environ.get("RACON_DB_PATH", "").strip()
+    if override:
+        return Path(override).expanduser()
     return get_data_dir() / "racon_v2.db"
 
 
@@ -40,12 +48,44 @@ def get_log_path() -> Path:
     return get_log_dir() / "racon.log"
 
 
+def get_token_path() -> Path:
+    """Return the persisted local API token path."""
+    return get_data_dir() / "racon_token.secret"
+
+
 def _default_auth_token() -> str:
-    """Return configured token or standard local development token."""
+    """Return the configured API token, generating a per-install secret when none is set.
+
+    There is deliberately no shared literal default: a shipped build must not contain a
+    token that every other install also accepts.
+    """
     env_token = os.environ.get("RACON_AUTH_TOKEN", os.environ.get("AUTH_TOKEN"))
     if env_token and env_token.strip():
         return env_token.strip()
-    return "racon-local-dev-token"
+
+    if os.environ.get("RACON_DEV_MODE", "").strip().lower() in ("1", "true", "yes", "on"):
+        return "racon-local-dev-token"
+
+    token_path = get_token_path()
+    try:
+        if token_path.is_file():
+            existing = token_path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+    except OSError:
+        pass
+
+    token = secrets.token_urlsafe(32)
+    try:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token, encoding="utf-8")
+        try:
+            token_path.chmod(0o600)
+        except OSError:
+            pass
+    except OSError:
+        logger.warning("Could not persist the generated API token; it is valid for this process only")
+    return token
 
 
 def _default_laya_cache_dir() -> Path:
@@ -69,19 +109,30 @@ class Settings(BaseSettings):
     API_PORT: int = Field(default=int(os.environ.get("RACON_PORT", "8765")), description="FastAPI server port")
     AUTH_TOKEN: str = Field(
         default_factory=_default_auth_token,
-        description="Shared secret authentication token",
+        description="Administrator authentication token. Never shipped in client builds.",
+    )
+    CLIENT_TOKEN: str = Field(
+        default=os.environ.get("RACON_CLIENT_TOKEN", "").strip(),
+        description=(
+            "Limited-scope token for desktop and web clients. Grants API access except "
+            "admin operations and settings changes. Empty disables client access."
+        ),
     )
     OLLAMA_HOST: str = Field(
         default=os.environ.get("OLLAMA_HOST", os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")),
         description="Ollama server endpoint URL",
     )
     SUPABASE_URL: str = Field(
-        default="https://aqqfhueypxkikgcbrfbn.supabase.co",
-        description="Supabase project URL",
+        default="",
+        description="Supabase project URL (server-side configuration only)",
     )
     SUPABASE_KEY: str = Field(
-        default="sb_publishable_DeyUioAnjw7JEub6D0ppSA_Veei_BQc",
-        description="Supabase public/anon API key",
+        default="",
+        description="Supabase publishable key (server-side configuration only)",
+    )
+    SUPABASE_SECRET_KEY: str = Field(
+        default="",
+        description="Supabase secret key. Server-side only; never shipped in a desktop build.",
     )
     LAYA_MODEL_CACHE_DIR: Path = Field(
         default_factory=_default_laya_cache_dir,
@@ -109,6 +160,13 @@ class Settings(BaseSettings):
     def _ensure_token(cls, v: Any) -> str:
         if v is None or (isinstance(v, str) and not v.strip()):
             return _default_auth_token()
+        return str(v).strip()
+
+    @field_validator("CLIENT_TOKEN", mode="before")
+    @classmethod
+    def _strip_client_token(cls, v: Any) -> str:
+        if v is None:
+            return ""
         return str(v).strip()
 
     @field_validator("LAYA_MODEL_CACHE_DIR", mode="before")
