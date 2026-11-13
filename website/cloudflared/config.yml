@@ -4,10 +4,13 @@
 # Replace <TUNNEL_UUID> with the id printed by that command.
 #
 # Routing:
-#   /v1/*, /health  -> API gateway on 127.0.0.1:8000 (auth, rate limits and path allow-list live there)
-#   everything else -> website container on 127.0.0.1:8080 (static site + installer downloads)
+#   /v1/*, /health, /admin, /api/* -> unified RACoN backend on 127.0.0.1:8765
+#   everything else                -> website container on 127.0.0.1:8081
 #
-# The gateway and website bind to loopback only. The tunnel is the only public entry point.
+# Worker ingress (/enroll, /heartbeat, /tasks/*) is intentionally not exposed here; workers
+# reach the coordinator over the tailnet.
+#
+# Both services bind to loopback only. The tunnel is the only public entry point.
 
 tunnel: d339eb37-f6e0-4052-bed6-fb99de11bbc7
 credentials-file: C:\Users\Haque\.cloudflared\d339eb37-f6e0-4052-bed6-fb99de11bbc7.json
@@ -15,10 +18,24 @@ credentials-file: C:\Users\Haque\.cloudflared\d339eb37-f6e0-4052-bed6-fb99de11bb
 ingress:
   - hostname: racon.metademic.org
     path: ^/v1/.*
-    service: http://127.0.0.1:8000
+    service: http://127.0.0.1:8765
   - hostname: racon.metademic.org
     path: ^/health$
-    service: http://127.0.0.1:8000
+    service: http://127.0.0.1:8765
+  # Admin dashboard and its polling API.
+  - hostname: racon.metademic.org
+    path: ^/admin(/.*)?$
+    service: http://127.0.0.1:8765
+  - hostname: racon.metademic.org
+    path: ^/api/.*
+    service: http://127.0.0.1:8765
+  # OpenAI clients that omit /v1 from their base URL still reach the API.
+  - hostname: racon.metademic.org
+    path: ^/chat/completions/?$
+    service: http://127.0.0.1:8765
+  - hostname: racon.metademic.org
+    path: ^/models/?$
+    service: http://127.0.0.1:8765
   - hostname: racon.metademic.org
     service: http://127.0.0.1:8081
   - service: http_status:404
