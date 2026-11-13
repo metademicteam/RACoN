@@ -18,12 +18,59 @@ DECISION_SYSTEM_PROMPT = """You are the routing model of RACoN, a distributed AI
 Decide whether the user request should be answered directly or decomposed into work for
 worker GPU/CPU nodes.
 
-chat = greetings, explanations, definitions, single code snippets, short advice, and any
-request one model can answer in one pass.
-task = research/comparison, multi-section reports, planning with several deliverables, or a
-request that explicitly asks for parallel work.
+Default to chat. Choose chat for greetings, suggestions, recommendations, movie/book lists,
+explanations, definitions, single code snippets, short advice, and any request one model can
+answer in one pass.
+
+Choose task ONLY for a long-horizon build or implementation project that benefits from
+multiple worker tasks: building an app/API/service, refactoring a codebase, multi-file
+implementation, end-to-end deployment, or a long research report with several explicit
+deliverables. When in doubt, answer chat.
 
 Answer with exactly one lowercase word and nothing else: chat or task."""
+
+#: Requests containing these are genuine build/implementation work.
+_BUILD_PATTERNS = (
+    r"\bbuild\b",
+    r"\bimplement\b",
+    r"\bdevelop\b",
+    r"\brefactor\b",
+    r"\bmigrate\b",
+    r"\bdeploy\b",
+    r"\bcodebase\b",
+    r"\brepository\b",
+    r"\brepo\b",
+    r"\bmulti[- ]file\b",
+    r"\bend[- ]to[- ]end\b",
+    r"\bagentic\b",
+    r"\blong[- ]horizon\b",
+    r"\bbackend\b",
+    r"\bfrontend\b",
+    r"\btest suite\b",
+    r"\bcreate (?:a|an) (?:app|application|project|service|api|tool|website)\b",
+    r"\bfix (?:the )?bug\b",
+    r"\bdebug\b",
+    r"\bpipeline\b",
+    r"\bworkflow\b",
+    r"\bproduction[- ]ready\b",
+    r"\bcomplete implementation\b",
+)
+
+#: Research/report work only qualifies as a task when it is also long.
+_RESEARCH_PATTERNS = (
+    r"\bresearch\b",
+    r"\bcompare and (?:analyze|contrast)\b",
+    r"\bcomprehensive report\b",
+    r"\bmulti[- ]section\b",
+    r"\bwhite ?paper\b",
+    r"\bsurvey\b",
+    r"\bdeep analysis\b",
+    r"\bpros and cons\b",
+    r"\btrade[- ]offs\b",
+    r"\bstep[- ]by[- ]step plan\b",
+    r"\bdeliverables\b",
+    r"\bwrite a (?:detailed|full|comprehensive) report\b",
+)
 
 
 def _content_text(content: Any) -> str:
@@ -39,7 +86,7 @@ def _content_text(content: Any) -> str:
 
 
 def conversation_text(messages: list[dict[str, Any]], *, limit: int = 12000) -> str:
-    """Flatten the last messages into a bounded transcript for the router."""
+    """Flatten the last messages into a bounded transcript for the merge stage."""
     lines: list[str] = []
     for message in messages[-12:]:
         role = str(message.get("role") or "user").upper()
@@ -48,6 +95,52 @@ def conversation_text(messages: list[dict[str, Any]], *, limit: int = 12000) -> 
             lines.append(f"{role}: {text[:4000]}")
     joined = "\n\n".join(lines).strip()
     return joined[:limit]
+
+
+def user_text(
+    messages: list[dict[str, Any]],
+    *,
+    limit: int = 4000,
+    max_messages: int = 3,
+) -> str:
+    """Return only the recent user turns.
+
+    Client system prompts often describe a coding agent ("codebase", "implement",
+    "build"). Routing on those makes every simple question look like a build task, so the
+    gate and the router see only what the user actually asked.
+    """
+    parts: list[str] = []
+    for message in reversed(messages):
+        if str(message.get("role") or "") != "user":
+            continue
+        text = _content_text(message.get("content")).strip()
+        if text:
+            parts.append(text[:4000])
+        if len(parts) >= max_messages:
+            break
+    return "\n\n".join(reversed(parts))[:limit]
+
+
+def is_task_candidate(messages: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Return whether a request is a genuine long-horizon task candidate.
+
+    This is a deliberate chat bias. The decision model occasionally labels a request like
+    "suggest new 2026 thriller movies" as a task because it contains a plural deliverable;
+    that turns a two-second answer into a minute of worker planning. Only explicit build
+    work, or a long research request, may enter the worker path.
+    """
+    text = user_text(messages, limit=4000).lower()
+    if not text.strip():
+        return False, "empty request"
+    for pattern in _BUILD_PATTERNS:
+        if re.search(pattern, text):
+            return True, f"build signal: {pattern}"
+    for pattern in _RESEARCH_PATTERNS:
+        if len(text) >= 400 and re.search(pattern, text):
+            return True, f"long research signal: {pattern}"
+    if len(text) >= 1500 and text.count("\n") >= 4:
+        return True, "long multi-line request"
+    return False, "simple chat"
 
 
 def _parse_decision(text: str) -> tuple[str, float, str]:
@@ -112,7 +205,21 @@ async def decide(
     Transport/authentication failures raise ``AgenticUnavailable`` so the gateway can use
     the deterministic path. A syntactically bad answer falls back to the local classifier.
     """
-    prompt = conversation_text(messages)
+    prompt = user_text(messages, limit=4000, max_messages=3)
+    candidate, candidate_reason = is_task_candidate(messages)
+
+    # Obvious chat should not pay for a router call or a worker plan. This is the path a
+    # greeting, a movie recommendation, or an explanation takes.
+    if not candidate and len(prompt) < 300:
+        decision = AgentDecision(
+            mode="chat",
+            confidence=0.95,
+            reason=f"fast chat: {candidate_reason}",
+            source="fast-chat",
+        )
+        logger.info("Routing decision: %s", decision.to_dict())
+        return decision
+
     request_messages = [
         {"role": "system", "content": DECISION_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
@@ -130,17 +237,46 @@ async def decide(
         )
     except TogetherError as exc:
         logger.warning("Routing model unavailable (%s): %s", exc.code, exc)
+        if not candidate:
+            return AgentDecision(
+                mode="chat",
+                confidence=0.7,
+                reason=f"router unavailable; defaulting to chat ({exc.code})",
+                source="heuristic",
+            )
         raise AgenticUnavailable(f"Together AI routing failed: {exc}") from exc
 
     try:
         mode, confidence, reason = _parse_decision(result.get("text") or "")
     except (ValueError, json.JSONDecodeError) as exc:
         logger.info("Routing model returned an invalid decision (%s); using heuristics", exc)
-        return heuristic_decision(
+        fallback = heuristic_decision(
             messages, tools, reason=f"Router output was invalid ({exc})"
         )
+        if fallback.mode == "task" and not candidate:
+            return AgentDecision(
+                mode="chat",
+                confidence=0.85,
+                reason=f"forced chat: {candidate_reason}",
+                source="gate",
+            )
+        return fallback
 
-    return AgentDecision(
+    if mode == "task" and not candidate:
+        # The model saw plural nouns or "suggest" and over-called task. The gate keeps the
+        # worker path for long-horizon build work only.
+        decision = AgentDecision(
+            mode="chat",
+            confidence=0.9,
+            reason=f"forced chat: {candidate_reason}",
+            source="gate",
+            model=model,
+            usage=result.get("usage") or {},
+        )
+        logger.info("Routing decision: %s", decision.to_dict())
+        return decision
+
+    decision = AgentDecision(
         mode=mode,
         confidence=confidence,
         reason=reason,
@@ -148,3 +284,5 @@ async def decide(
         model=model,
         usage=result.get("usage") or {},
     )
+    logger.info("Routing decision: %s", decision.to_dict())
+    return decision

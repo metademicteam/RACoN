@@ -92,6 +92,7 @@ async def merge_outputs(
     outcomes: list[TaskOutcome],
     max_tokens: int,
     on_delta: Optional[DeltaCallback] = None,
+    reasoning: Optional[dict[str, Any]] = None,
 ) -> MergeResult:
     """Run one bounded merge/review generation over the worker outputs."""
     if not any(item.succeeded for item in outcomes):
@@ -113,6 +114,7 @@ async def merge_outputs(
             model=model,
             max_tokens=budget,
             temperature=0.2,
+            reasoning=reasoning,
         ):
             content = event.get("content")
             if content:
@@ -146,6 +148,7 @@ async def merge_outputs(
                 model=model,
                 max_tokens=budget,
                 temperature=0.2,
+                reasoning=reasoning,
             )
             text = str(result.get("text") or "").strip()
             if not text and result.get("finish_reason") == "length" and budget < 3072:
@@ -162,6 +165,7 @@ async def merge_outputs(
                     model=model,
                     max_tokens=larger,
                     temperature=0.2,
+                    reasoning=reasoning,
                 )
                 text = str(result.get("text") or "").strip()
             if text:

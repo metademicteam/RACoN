@@ -116,6 +116,7 @@ class TogetherClient:
         tool_choice: Any,
         response_format: Optional[dict[str, Any]],
         stream: bool,
+        reasoning: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": model,
@@ -133,6 +134,8 @@ class TogetherClient:
             body["tool_choice"] = tool_choice if tool_choice is not None else "auto"
         if response_format:
             body["response_format"] = response_format
+        if reasoning:
+            body["reasoning"] = reasoning
         if stream:
             body["stream_options"] = {"include_usage": True}
         return body
@@ -149,6 +152,7 @@ class TogetherClient:
         tools: Optional[list[dict[str, Any]]] = None,
         tool_choice: Any = None,
         response_format: Optional[dict[str, Any]] = None,
+        reasoning: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """One non-streaming completion.
 
@@ -168,6 +172,7 @@ class TogetherClient:
             tool_choice=tool_choice,
             response_format=response_format,
             stream=False,
+            reasoning=reasoning,
         )
         payload: dict[str, Any] = {}
         for attempt in range(self.max_retries + 1):
@@ -217,6 +222,7 @@ class TogetherClient:
         temperature: float = 0.3,
         top_p: Optional[float] = None,
         stop: Optional[list[str]] = None,
+        reasoning: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[dict[str, Any]]:
         """Stream content deltas and the final usage."""
         if not self.configured:
@@ -233,6 +239,7 @@ class TogetherClient:
             tool_choice=None,
             response_format=None,
             stream=True,
+            reasoning=reasoning,
         )
         url = f"{self.base_url}/chat/completions"
         last_usage: dict[str, Any] = {}

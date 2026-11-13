@@ -33,6 +33,8 @@ TOGETHER_API_KEY=tgp_...
 TOGETHER_BASE_URL=https://api.together.xyz/v1
 TOGETHER_DECISION_MODEL=together/Tev1-4B-experimental
 TOGETHER_AGENT_MODEL=MiniMaxAI/MiniMax-M3.1-Flash
+# 'none' disables hidden reasoning; required for fast, reliable normal chat.
+TOGETHER_REASONING_EFFORT=none
 TOGETHER_TIMEOUT_S=90
 TOGETHER_DECISION_MAX_TOKENS=96
 TOGETHER_AGENT_MAX_TOKENS=2048
@@ -59,6 +61,19 @@ docker compose logs -f racn-coordinator
 | `model: "racon-single"` / `racon-task` | Existing deterministic modes; unchanged. |
 | Explicit worker model | Existing single-worker path; unchanged. |
 | Request with `tools`, a `tool` role, or `tool_calls` | Existing single-worker path; the client's tool loop is never split or replaced. |
+
+## Fast chat path
+
+Short user requests with no build or long-horizon signal skip the router and stream the
+agent model immediately. The gate only reads user turns, so a client system prompt that
+mentions "codebase", "implement", or "build" cannot turn a movie question into a task.
+
+`TOGETHER_REASONING_EFFORT=none` is important for latency: MiniMax otherwise spends the
+entire output budget on hidden `reasoning_content` and returns no visible answer. With
+reasoning disabled, normal chat starts streaming in about two seconds.
+
+Genuine build requests still go through the decision model. Task mode emits a visible
+status line immediately and sends `: keepalive` SSE comments while workers run.
 
 ## Routing decision
 

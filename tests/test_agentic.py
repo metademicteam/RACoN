@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from backend.racon.agentic import service as service_module
 from backend.racon.agentic import selection as selection_module
-from backend.racon.agentic.decision import decide
+from backend.racon.agentic.decision import decide, is_task_candidate
 from backend.racon.agentic.schemas import AgentDecision, AgentTask
 from backend.racon.agentic.service import AgenticService
 
@@ -19,6 +19,7 @@ class FakeSettings:
     TOGETHER_BASE_URL = "https://example.invalid/v1"
     TOGETHER_DECISION_MODEL = "decision-model"
     TOGETHER_AGENT_MODEL = "agent-model"
+    TOGETHER_REASONING_EFFORT = "none"
     TOGETHER_TIMEOUT_S = 10.0
     TOGETHER_DECISION_MAX_TOKENS = 64
     TOGETHER_AGENT_MAX_TOKENS = 512
@@ -126,7 +127,12 @@ def test_decision_model_parses_json():
         decide(
             client,
             model="decision-model",
-            messages=[{"role": "user", "content": "Compare A and B in detail."}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Build a small REST API with tests and deploy it.",
+                }
+            ],
         )
     )
     assert decision.mode == "task"
@@ -140,11 +146,69 @@ def test_decision_invalid_json_uses_heuristic():
         decide(
             client,
             model="decision-model",
-            messages=[{"role": "user", "content": "Hi there"}],
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Build a small REST API with tests and deploy it.",
+                }
+            ],
+        )
+    )
+    assert decision.source == "heuristic"
+
+
+def test_fast_chat_skips_router_for_simple_suggestion():
+    client = FakeClient()
+    decision = asyncio.run(
+        decide(
+            client,
+            model="decision-model",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a coding agent. Build and implement codebase features, "
+                        "refactor repositories, and deploy production-ready services."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": "hey can you suggest new 2026 hollywood thriller movies",
+                },
+            ],
         )
     )
     assert decision.mode == "chat"
-    assert decision.source == "heuristic"
+    assert decision.source == "fast-chat"
+    assert client.chat_calls == []
+
+
+def test_task_gate_only_accepts_long_horizon_or_build_work():
+    movie, _ = is_task_candidate(
+        [{"role": "user", "content": "suggest new 2026 hollywood thriller movies"}]
+    )
+    build, _ = is_task_candidate(
+        [{"role": "user", "content": "build me a todo app with React and a backend"}]
+    )
+    short_compare, _ = is_task_candidate(
+        [{"role": "user", "content": "compare CPU and GPU inference and write a report"}]
+    )
+    long_research, _ = is_task_candidate(
+        [
+            {
+                "role": "user",
+                "content": (
+                    "Research the trade-offs of CPU and GPU inference for a small team. "
+                    + "Include a comprehensive report with several sections and deliverables. "
+                    * 8
+                ),
+            }
+        ]
+    )
+    assert movie is False
+    assert build is True
+    assert short_compare is False
+    assert long_research is True
 
 
 def test_selection_prefers_measured_fast_worker():
@@ -306,6 +370,7 @@ def test_chat_mode_streams_agent_answer():
     assert result["text"] == "Hello!"
     assert result["effective_mode"] == "chat"
     assert result["tasks"] == []
+    assert client.stream_calls[0]["reasoning"] == {"effort": "none"}
 
 
 def test_no_workers_falls_back_to_direct_chat(monkeypatch):
@@ -337,6 +402,48 @@ def test_agent_alias_selects_agentic_intent():
 
     decision = choose_intent("racon-agent", [{"role": "user", "content": "Hi"}])
     assert decision.mode == "agent"
+
+
+def test_agent_sse_shows_visible_status_and_keepalive():
+    from backend.racon.network.gateway import NetworkGateway
+
+    class FakeStreamingService:
+        async def stream(self, decision, request, messages):
+            yield {
+                "event": "visible_status",
+                "message": "I'm planning this with 1 worker node.",
+            }
+            yield {"event": "heartbeat"}
+            yield {
+                "event": "done",
+                "text": "final merged answer",
+                "usage": {},
+                "effective_mode": "task",
+                "tasks": [],
+                "merge_model": "agent-model",
+                "degraded": False,
+            }
+
+    gateway = NetworkGateway()
+
+    async def collect() -> str:
+        parts = []
+        async for part in gateway._agent_sse(
+            FakeStreamingService(),
+            _task_decision(),
+            _request(),
+            [{"role": "user", "content": "build a small app"}],
+            None,
+        ):
+            parts.append(part if isinstance(part, bytes) else part.encode())
+        return b"".join(parts).decode()
+
+    body = asyncio.run(collect())
+    assert "I'm planning this with 1 worker node." in body
+    assert ": keepalive" in body
+    assert "final merged answer" in body
+    assert body.count("final merged answer") == 1
+    assert "data: [DONE]" in body
 
 
 def test_merge_retries_when_reasoning_consumes_budget():

@@ -287,7 +287,7 @@ class NetworkGateway:
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         usage: dict[str, Any] = {}
-        emitted_content = False
+        emitted_answer_content = False
 
         def frame(payload: dict[str, Any]) -> bytes:
             return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode("utf-8")
@@ -314,17 +314,27 @@ class NetworkGateway:
         try:
             async for event in service.stream(decision, request, messages):
                 event_type = str(event.get("event") or "")
+                if event_type == "visible_status":
+                    message = str(event.get("message") or "").strip()
+                    if message:
+                        yield chunk({"content": message + "\n\n"})
+                    continue
+                if event_type == "heartbeat":
+                    # A comment frame keeps the HTTP connection warm while workers run;
+                    # it is not part of the assistant content.
+                    yield b": keepalive\n\n"
+                    continue
                 if event_type in ("delta", "merge_delta"):
                     text = str(event.get("delta") or "")
                     if text:
-                        emitted_content = True
+                        emitted_answer_content = True
                         yield chunk({"content": text})
                     continue
                 if event_type == "done":
                     usage = event.get("usage") or {}
                     text = str(event.get("text") or "")
-                    if text and not emitted_content:
-                        emitted_content = True
+                    if text and not emitted_answer_content:
+                        emitted_answer_content = True
                         yield chunk({"content": text})
                     yield chunk(
                         {},

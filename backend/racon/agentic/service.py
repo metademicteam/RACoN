@@ -159,6 +159,14 @@ class AgenticService:
             self._dispatcher = InProcessDispatcher()
         return self._dispatcher
 
+    def _reasoning(self) -> Optional[dict[str, str]]:
+        effort = str(
+            getattr(self.settings, "TOGETHER_REASONING_EFFORT", "none") or "none"
+        ).strip().lower()
+        if not effort or effort == "default":
+            return None
+        return {"effort": effort}
+
     # ------------------------------------------------------------------ routing
 
     async def prepare(
@@ -282,6 +290,7 @@ class AgenticService:
                 temperature=float(request.temperature),
                 top_p=float(request.top_p),
                 stop=request.stop,
+                reasoning=self._reasoning(),
             ):
                 if event.get("content"):
                     parts.append(str(event["content"]))
@@ -310,6 +319,7 @@ class AgenticService:
                     temperature=float(request.temperature),
                     top_p=float(request.top_p),
                     stop=request.stop,
+                    reasoning=self._reasoning(),
                 )
                 text = str(result.get("text") or "").strip()
                 if text:
@@ -353,6 +363,12 @@ class AgenticService:
         environment = build_environment(self.settings.RACON_AGENTIC_WORKER_MODEL)
         if not environment.get("worker_count"):
             yield {
+                "event": "visible_status",
+                "message": (
+                    "No worker nodes are online, so the agent model is answering directly."
+                ),
+            }
+            yield {
                 "event": "progress",
                 "stage": "no_workers",
                 "message": (
@@ -368,6 +384,13 @@ class AgenticService:
                 yield event
             return
 
+        yield {
+            "event": "visible_status",
+            "message": (
+                f"I'm planning this with {environment['worker_count']} worker node(s). "
+                "The merged answer will stream here when they finish."
+            ),
+        }
         yield {
             "event": "progress",
             "stage": "planning",
@@ -476,7 +499,12 @@ class AgenticService:
 
             task_runner = asyncio.create_task(run_tasks())
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # Keep the HTTP stream alive while workers are executing.
+                    yield {"event": "heartbeat"}
+                    continue
                 if item is None:
                     break
                 yield item
@@ -526,6 +554,7 @@ class AgenticService:
                     outcomes=ordered,
                     max_tokens=self.settings.RACON_AGENTIC_MERGE_MAX_TOKENS,
                     on_delta=on_merge_delta,
+                    reasoning=self._reasoning(),
                 )
             except Exception as exc:
                 merge_holder["error"] = exc
@@ -534,7 +563,11 @@ class AgenticService:
 
         merge_task = asyncio.create_task(run_merge())
         while True:
-            item = await merge_queue.get()
+            try:
+                item = await asyncio.wait_for(merge_queue.get(), timeout=10.0)
+            except asyncio.TimeoutError:
+                yield {"event": "heartbeat"}
+                continue
             if item is None:
                 break
             yield {"event": "merge_delta", "delta": item}
@@ -604,6 +637,7 @@ class AgenticService:
                     temperature=0.2,
                     tools=PLANNING_TOOLS,
                     tool_choice="auto",
+                    reasoning=self._reasoning(),
                 )
             except TogetherError as exc:
                 logger.warning("Agent planning failed (%s): %s", exc.code, exc)

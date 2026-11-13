@@ -182,6 +182,13 @@ class Settings(BaseSettings):
         default="MiniMaxAI/MiniMax-M3.1-Flash",
         description="Agent model used for chat, planning/tool calls, and merge review",
     )
+    TOGETHER_REASONING_EFFORT: str = Field(
+        default="none",
+        description=(
+            "Reasoning effort for the agent model. 'none' prevents hidden reasoning from "
+            "consuming the output budget and is the fast-chat default."
+        ),
+    )
     TOGETHER_TIMEOUT_S: float = Field(
         default=90.0,
         gt=0.0,
@@ -234,6 +241,12 @@ class Settings(BaseSettings):
     @classmethod
     def _strip_agentic_strings(cls, v: Any) -> str:
         return "" if v is None else str(v).strip()
+
+    @field_validator("TOGETHER_REASONING_EFFORT", mode="before")
+    @classmethod
+    def _normalise_reasoning_effort(cls, v: Any) -> str:
+        text = "" if v is None else str(v).strip().lower()
+        return text or "none"
 
     @field_validator("TOGETHER_BASE_URL")
     @classmethod
