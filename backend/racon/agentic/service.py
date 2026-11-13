@@ -577,6 +577,16 @@ class AgenticService:
                     ),
                 }
 
+        if tasks:
+            titles = ", ".join(task.title for task in tasks[:6])
+            yield {
+                "event": "visible_status",
+                "message": (
+                    f"MiniMax planned {len(tasks)} task(s): {titles}. "
+                    "Dispatching to worker nodes now."
+                ),
+            }
+
         outcomes: dict[str, TaskOutcome] = dict(unplaced)
         if executable:
             runner = AgentTaskRunner(
@@ -613,6 +623,31 @@ class AgenticService:
                     continue
                 if item is None:
                     break
+                if isinstance(item, dict):
+                    if item.get("event") == "task_started":
+                        yield {
+                            "event": "visible_status",
+                            "message": (
+                                f"Worker {item.get('worker_id')} started "
+                                f"'{item.get('title')}'."
+                            ),
+                        }
+                    elif item.get("event") == "task_done":
+                        title = item.get("title")
+                        if item.get("status") == "completed":
+                            duration = float(item.get("duration_ms") or 0.0) / 1000.0
+                            yield {
+                                "event": "visible_status",
+                                "message": f"Task '{title}' finished in {duration:.1f}s.",
+                            }
+                        else:
+                            yield {
+                                "event": "visible_status",
+                                "message": (
+                                    f"Task '{title}' failed: "
+                                    f"{item.get('error') or 'unknown error'}."
+                                ),
+                            }
                 yield item
             await task_runner
             if "error" in holder:
@@ -636,6 +671,12 @@ class AgenticService:
             }
             return
 
+        yield {
+            "event": "visible_status",
+            "message": (
+                "All worker tasks finished. MiniMax is merging and reviewing the outputs now."
+            ),
+        }
         yield {
             "event": "progress",
             "stage": "merging",

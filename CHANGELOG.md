@@ -28,9 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `TOGETHER_REASONING_EFFORT=none` disables hidden reasoning for the agent model. Without
   it, a simple movie recommendation could spend the entire output budget on
   `reasoning_content` and return no visible answer.
-- Task mode emits a visible status line and MiniMax's own plan update immediately, then
-  sends SSE keepalive comments while workers execute, so clients no longer see an empty
-  stream during long worker waits.
+- Task mode emits a visible status line, MiniMax's plan summary, and per-task start/finish
+  updates, then sends SSE keepalive comments while workers execute, so clients no longer
+  see an empty stream during long worker waits.
 - Requests carrying client tools or tool results now stay on MiniMax. Tool-call deltas are
   streamed back to the client with `finish_reason: "tool_calls"` instead of falling through
   to the deterministic worker path and ending the OpenCode session.

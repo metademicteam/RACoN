@@ -18,9 +18,9 @@ MiniMax router (one word, reasoning disabled)
                                    └─ streamed final answer
 ```
 
-Task mode emits a visible status line and MiniMax's own plan update before workers run, then
-`: keepalive` SSE comments while they execute. The `racon` sidecar carries structured
-progress; the final answer streams as ordinary `delta.content`.
+Task mode emits a visible status line, MiniMax's plan summary, and per-task start/finish
+updates, then `: keepalive` SSE comments while workers execute. The `racon` sidecar carries
+structured progress; the final answer streams as ordinary `delta.content`.
 
 ## Enable
 
@@ -75,8 +75,9 @@ entire output budget on hidden `reasoning_content` and returns no visible answer
 reasoning disabled, the router call is cheap and normal chat starts streaming in about two
 seconds.
 
-Genuine build requests still enter task mode. Task mode emits a visible status line and
-MiniMax's plan update immediately, then sends `: keepalive` SSE comments while workers run.
+Genuine build requests still enter task mode. Task mode emits a visible status line,
+MiniMax's plan summary, and a start/finish update for each worker task, then sends
+`: keepalive` SSE comments while workers run.
 
 ## Routing decision
 
