@@ -2,8 +2,8 @@
 
 The layer sits in front of the OpenAI-compatible surface:
 
-* a small decision model (Tev) classifies the request as ``chat`` or ``task``;
-* normal chat is answered by the agent model (MiniMax);
+* MiniMax classifies the request as ``chat`` or ``task`` with a one-word router call;
+* normal chat is answered by MiniMax, including client tool calls;
 * task requests are planned with tool calls against the live worker environment, the
   resulting tasks run in parallel on the fastest suitable workers, and only their final
   outputs return to the coordinator for a low-token merge/review pass.

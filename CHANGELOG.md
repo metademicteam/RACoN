@@ -9,10 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added - Together AI agentic scheduler
 
-- `racon` and `racon-agent` can now run through a Together AI layer: the
-  `together/Tev1-4B-experimental` decision model classifies chat vs task,
-  `MiniMaxAI/MiniMax-M3.1-Flash` answers normal chat, plans task requests with tool calls,
-  and merges/reviews worker outputs with a low token budget.
+- `racon` and `racon-agent` can now run through a Together AI layer:
+  `MiniMaxAI/MiniMax-M3.1-Flash` routes chat vs task, answers normal chat (including client
+  tool calls), plans long-horizon tasks with tool calls, and merges/reviews worker outputs
+  with a bounded token budget.
 - Task plans are dispatched in parallel to online workers with a measured fastest-node
   score (claim latency/TTFT, load, RAM, model fit). Only final worker outputs return to the
   coordinator; progress is streamed in the `racon` SSE sidecar.
@@ -22,14 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed - agentic latency and task selection
 
-- Normal chat now uses a user-only task gate and a short fast path. Obvious chat requests
-  skip the router and stream the agent model immediately instead of being decomposed into
-  worker tasks.
+- Normal chat now uses a user-only task gate. MiniMax still makes the one-word routing
+  decision, but chat requests never enter worker planning just because a client system
+  prompt contains coding language.
 - `TOGETHER_REASONING_EFFORT=none` disables hidden reasoning for the agent model. Without
   it, a simple movie recommendation could spend the entire output budget on
   `reasoning_content` and return no visible answer.
-- Task mode emits a visible status line immediately and sends SSE keepalive comments while
-  workers execute, so clients no longer see an empty stream during long worker waits.
+- Task mode emits a visible status line and MiniMax's own plan update immediately, then
+  sends SSE keepalive comments while workers execute, so clients no longer see an empty
+  stream during long worker waits.
+- Requests carrying client tools or tool results now stay on MiniMax. Tool-call deltas are
+  streamed back to the client with `finish_reason: "tool_calls"` instead of falling through
+  to the deterministic worker path and ending the OpenCode session.
 
 ### Fixed - Cloudflare tunnel and admin routing
 

@@ -174,10 +174,6 @@ class Settings(BaseSettings):
         default="https://api.together.xyz/v1",
         description="OpenAI-compatible Together AI API base URL",
     )
-    TOGETHER_DECISION_MODEL: str = Field(
-        default="together/Tev1-4B-experimental",
-        description="Low-cost model that classifies chat vs task",
-    )
     TOGETHER_AGENT_MODEL: str = Field(
         default="MiniMaxAI/MiniMax-M3.1-Flash",
         description="Agent model used for chat, planning/tool calls, and merge review",
@@ -196,10 +192,10 @@ class Settings(BaseSettings):
         description="Per-request Together AI timeout in seconds",
     )
     TOGETHER_DECISION_MAX_TOKENS: int = Field(
-        default=96,
-        ge=16,
+        default=16,
+        ge=4,
         le=512,
-        description="Output budget for the routing decision",
+        description="Router output budget (MiniMax answers chat or task)",
     )
     TOGETHER_AGENT_MAX_TOKENS: int = Field(
         default=2048,
@@ -233,7 +229,6 @@ class Settings(BaseSettings):
     @field_validator(
         "TOGETHER_API_KEY",
         "TOGETHER_BASE_URL",
-        "TOGETHER_DECISION_MODEL",
         "TOGETHER_AGENT_MODEL",
         "RACON_AGENTIC_WORKER_MODEL",
         mode="before",

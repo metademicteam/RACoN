@@ -117,6 +117,7 @@ class TogetherClient:
         response_format: Optional[dict[str, Any]],
         stream: bool,
         reasoning: Optional[dict[str, Any]] = None,
+        parallel_tool_calls: Optional[bool] = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": model,
@@ -132,6 +133,8 @@ class TogetherClient:
         if tools:
             body["tools"] = tools
             body["tool_choice"] = tool_choice if tool_choice is not None else "auto"
+            if parallel_tool_calls is not None:
+                body["parallel_tool_calls"] = bool(parallel_tool_calls)
         if response_format:
             body["response_format"] = response_format
         if reasoning:
@@ -153,6 +156,7 @@ class TogetherClient:
         tool_choice: Any = None,
         response_format: Optional[dict[str, Any]] = None,
         reasoning: Optional[dict[str, Any]] = None,
+        parallel_tool_calls: Optional[bool] = None,
     ) -> dict[str, Any]:
         """One non-streaming completion.
 
@@ -173,6 +177,7 @@ class TogetherClient:
             response_format=response_format,
             stream=False,
             reasoning=reasoning,
+            parallel_tool_calls=parallel_tool_calls,
         )
         payload: dict[str, Any] = {}
         for attempt in range(self.max_retries + 1):
@@ -223,8 +228,11 @@ class TogetherClient:
         top_p: Optional[float] = None,
         stop: Optional[list[str]] = None,
         reasoning: Optional[dict[str, Any]] = None,
+        tools: Optional[list[dict[str, Any]]] = None,
+        tool_choice: Any = None,
+        parallel_tool_calls: Optional[bool] = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Stream content deltas and the final usage."""
+        """Stream content deltas, tool-call deltas, and the final usage."""
         if not self.configured:
             raise TogetherError("TOGETHER_API_KEY is not configured", code="not_configured")
 
@@ -235,11 +243,12 @@ class TogetherClient:
             temperature=temperature,
             top_p=top_p,
             stop=stop,
-            tools=None,
-            tool_choice=None,
+            tools=tools,
+            tool_choice=tool_choice,
             response_format=None,
             stream=True,
             reasoning=reasoning,
+            parallel_tool_calls=parallel_tool_calls,
         )
         url = f"{self.base_url}/chat/completions"
         last_usage: dict[str, Any] = {}

@@ -197,10 +197,11 @@ async def decide(
     model: str,
     messages: list[dict[str, Any]],
     tools: Any = None,
-    max_tokens: int = 96,
+    max_tokens: int = 16,
     timeout_s: float = 30.0,
+    reasoning: Optional[dict[str, Any]] = None,
 ) -> AgentDecision:
-    """Ask the small model for a routing decision.
+    """Ask MiniMax for a one-word routing decision.
 
     Transport/authentication failures raise ``AgenticUnavailable`` so the gateway can use
     the deterministic path. A syntactically bad answer falls back to the local classifier.
@@ -208,32 +209,20 @@ async def decide(
     prompt = user_text(messages, limit=4000, max_messages=3)
     candidate, candidate_reason = is_task_candidate(messages)
 
-    # Obvious chat should not pay for a router call or a worker plan. This is the path a
-    # greeting, a movie recommendation, or an explanation takes.
-    if not candidate and len(prompt) < 300:
-        decision = AgentDecision(
-            mode="chat",
-            confidence=0.95,
-            reason=f"fast chat: {candidate_reason}",
-            source="fast-chat",
-        )
-        logger.info("Routing decision: %s", decision.to_dict())
-        return decision
-
     request_messages = [
         {"role": "system", "content": DECISION_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
 
     try:
-        # The experimental decision model has a very small output window, so ask for one
-        # word instead of a JSON object. The parser also accepts JSON if a deployment
-        # returns it.
+        # MiniMax is both the router and the responder now. A one-word answer with
+        # reasoning disabled is cheap and settles chat vs task without a second model.
         result = await client.chat(
             request_messages,
             model=model,
             max_tokens=max_tokens,
             temperature=0.0,
+            reasoning=reasoning,
         )
     except TogetherError as exc:
         logger.warning("Routing model unavailable (%s): %s", exc.code, exc)
@@ -279,8 +268,12 @@ async def decide(
     decision = AgentDecision(
         mode=mode,
         confidence=confidence,
-        reason=reason,
-        source="together",
+        reason=(
+            reason
+            if reason and reason != "router label"
+            else f"MiniMax router: {mode}"
+        ),
+        source="minimax-router",
         model=model,
         usage=result.get("usage") or {},
     )

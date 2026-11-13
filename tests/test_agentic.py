@@ -17,11 +17,10 @@ class FakeSettings:
     TOGETHER_ENABLED = True
     TOGETHER_API_KEY = "test-key"
     TOGETHER_BASE_URL = "https://example.invalid/v1"
-    TOGETHER_DECISION_MODEL = "decision-model"
     TOGETHER_AGENT_MODEL = "agent-model"
     TOGETHER_REASONING_EFFORT = "none"
     TOGETHER_TIMEOUT_S = 10.0
-    TOGETHER_DECISION_MAX_TOKENS = 64
+    TOGETHER_DECISION_MAX_TOKENS = 16
     TOGETHER_AGENT_MAX_TOKENS = 512
     RACON_AGENTIC_MAX_TASKS = 4
     RACON_AGENTIC_MAX_PARALLEL = 2
@@ -136,7 +135,7 @@ def test_decision_model_parses_json():
         )
     )
     assert decision.mode == "task"
-    assert decision.source == "together"
+    assert decision.source == "minimax-router"
     assert decision.confidence == 0.93
 
 
@@ -157,12 +156,22 @@ def test_decision_invalid_json_uses_heuristic():
     assert decision.source == "heuristic"
 
 
-def test_fast_chat_skips_router_for_simple_suggestion():
-    client = FakeClient()
+def test_minimax_router_handles_simple_chat():
+    client = FakeClient(
+        chat_responses=[
+            {
+                "text": "chat",
+                "tool_calls": [],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1, "reported": True},
+                "finish_reason": "stop",
+            }
+        ]
+    )
     decision = asyncio.run(
         decide(
             client,
-            model="decision-model",
+            model="agent-model",
+            reasoning={"effort": "none"},
             messages=[
                 {
                     "role": "system",
@@ -179,8 +188,11 @@ def test_fast_chat_skips_router_for_simple_suggestion():
         )
     )
     assert decision.mode == "chat"
-    assert decision.source == "fast-chat"
-    assert client.chat_calls == []
+    assert decision.source == "minimax-router"
+    assert len(client.chat_calls) == 1
+    assert client.chat_calls[0]["reasoning"] == {"effort": "none"}
+    # The system prompt's coding language must not be routed on.
+    assert "codebase" not in client.chat_calls[0]["messages"][1]["content"]
 
 
 def test_task_gate_only_accepts_long_horizon_or_build_work():
@@ -402,6 +414,121 @@ def test_agent_alias_selects_agentic_intent():
 
     decision = choose_intent("racon-agent", [{"role": "user", "content": "Hi"}])
     assert decision.mode == "agent"
+
+
+def test_agent_messages_preserves_tool_results():
+    from backend.racon.agentic.service import _agent_messages
+
+    normalized = _agent_messages(
+        [
+            {"role": "user", "content": "Read a.txt"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path":"a.txt"}'},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "hello world",
+            },
+        ]
+    )
+    assert [item["role"] for item in normalized] == ["user", "assistant", "tool"]
+    assert normalized[-1]["tool_call_id"] == "call_1"
+    assert normalized[-1]["content"] == "hello world"
+
+
+def test_chat_stream_forwards_tool_calls_and_assembles_them():
+    client = FakeClient(
+        stream_chunks=[
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path"'},
+                    }
+                ]
+            },
+            {
+                "tool_calls": [
+                    {"index": 0, "function": {"arguments": ':"a.txt"}'}}
+                ]
+            },
+            {"done": True},
+        ]
+    )
+    service = AgenticService(settings=FakeSettings(), client=client)
+    decision = AgentDecision(mode="chat", confidence=0.9, reason="tool loop")
+    request = _request(
+        tools=[{"type": "function", "function": {"name": "read_file"}}],
+        tool_choice="auto",
+        parallel_tool_calls=False,
+    )
+    result = asyncio.run(
+        service.complete(decision, request, [{"role": "user", "content": "read a.txt"}])
+    )
+    assert result["text"] == ""
+    assert result["finish_reason"] == "tool_calls"
+    assert len(result["tool_calls"]) == 1
+    assert result["tool_calls"][0]["function"]["name"] == "read_file"
+    assert result["tool_calls"][0]["function"]["arguments"] == '{"path":"a.txt"}'
+    assert client.stream_calls[0]["tools"] == request.tools
+    assert client.stream_calls[0]["parallel_tool_calls"] is False
+
+
+def test_agent_sse_forwards_tool_calls_with_tool_finish_reason():
+    from backend.racon.network.gateway import NetworkGateway
+
+    class FakeToolService:
+        async def stream(self, decision, request, messages):
+            yield {
+                "event": "tool_calls",
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": '{"path":"a.txt"}'},
+                    }
+                ],
+            }
+            yield {
+                "event": "done",
+                "text": "",
+                "tool_calls": True,
+                "usage": {},
+                "effective_mode": "chat",
+                "tasks": [],
+                "degraded": False,
+            }
+
+    gateway = NetworkGateway()
+
+    async def collect() -> str:
+        parts = []
+        async for part in gateway._agent_sse(
+            FakeToolService(),
+            AgentDecision(mode="chat", confidence=0.9, reason="tool loop"),
+            _request(tools=[{"type": "function"}]),
+            [{"role": "user", "content": "read a.txt"}],
+            None,
+        ):
+            parts.append(part if isinstance(part, bytes) else part.encode())
+        return b"".join(parts).decode()
+
+    body = asyncio.run(collect())
+    assert '"tool_calls"' in body
+    assert '"finish_reason":"tool_calls"' in body
+    assert "data: [DONE]" in body
 
 
 def test_agent_sse_shows_visible_status_and_keepalive():

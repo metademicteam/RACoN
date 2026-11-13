@@ -216,11 +216,9 @@ class NetworkGateway:
         requested = str(getattr(request, "model", "") or "").strip().lower()
         if requested not in {"racon", "racon-agent"}:
             return False
-        if getattr(request, "tools", None):
-            return False
-        for message in messages:
-            if str(message.get("role") or "") == "tool" or message.get("tool_calls"):
-                return False
+        # Requests with client tools or tool results stay on MiniMax too. The old
+        # deterministic worker path silently dropped the tool loop, which is what made
+        # OpenCode sessions end as "terminated".
         try:
             from backend.racon.agentic.service import get_agentic_service
 
@@ -246,6 +244,13 @@ class NetworkGateway:
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         result = await service.complete(decision, request, messages)
+        tool_calls = result.get("tool_calls") or []
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": result.get("text") or None,
+        }
+        if tool_calls:
+            message["tool_calls"] = tool_calls
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
             "object": "chat.completion",
@@ -254,8 +259,9 @@ class NetworkGateway:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": result["text"]},
-                    "finish_reason": "stop",
+                    "message": message,
+                    "finish_reason": result.get("finish_reason")
+                    or ("tool_calls" if tool_calls else "stop"),
                 }
             ],
             "usage": result.get("usage")
@@ -270,6 +276,7 @@ class NetworkGateway:
                 "effective_mode": result.get("effective_mode", decision.mode),
                 "decision": decision.to_dict(),
                 "tasks": result.get("tasks") or [],
+                "tool_calls": bool(tool_calls),
                 "merge_model": result.get("merge_model"),
                 "degraded": bool(result.get("degraded")),
                 "api_key_id": api_key_id,
@@ -288,6 +295,7 @@ class NetworkGateway:
         created = int(time.time())
         usage: dict[str, Any] = {}
         emitted_answer_content = False
+        saw_tool_calls = False
 
         def frame(payload: dict[str, Any]) -> bytes:
             return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode("utf-8")
@@ -324,6 +332,12 @@ class NetworkGateway:
                     # it is not part of the assistant content.
                     yield b": keepalive\n\n"
                     continue
+                if event_type == "tool_calls":
+                    calls = event.get("tool_calls") or []
+                    if calls:
+                        saw_tool_calls = True
+                        yield chunk({"tool_calls": calls})
+                    continue
                 if event_type in ("delta", "merge_delta"):
                     text = str(event.get("delta") or "")
                     if text:
@@ -336,15 +350,17 @@ class NetworkGateway:
                     if text and not emitted_answer_content:
                         emitted_answer_content = True
                         yield chunk({"content": text})
+                    saw_tool_calls = saw_tool_calls or bool(event.get("tool_calls"))
                     yield chunk(
                         {},
-                        finish="stop",
+                        finish="tool_calls" if saw_tool_calls else "stop",
                         racon={
                             "mode": "agent",
                             "event": "done",
                             "effective_mode": event.get("effective_mode", decision.mode),
                             "decision": decision.to_dict(),
                             "tasks": event.get("tasks") or [],
+                            "tool_calls": saw_tool_calls,
                             "merge_model": event.get("merge_model"),
                             "degraded": bool(event.get("degraded")),
                             "degraded_tasks": event.get("degraded_tasks") or [],

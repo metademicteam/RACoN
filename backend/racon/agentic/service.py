@@ -32,7 +32,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_PLAN_ROUNDS = 4
 _TASK_ID_RE = re.compile(r"[^a-z0-9_-]+")
-_VALID_ROLES = {"system", "user", "assistant"}
+_VALID_ROLES = {"system", "user", "assistant", "tool"}
+_TOOL_USE_GUIDANCE = """Tools are available, but use them only when the user explicitly
+needs file access, code changes, or command execution. For general chat, suggestions,
+recommendations, explanations, and knowledge questions, answer directly without calling a
+tool. After a tool result, answer the user concisely; do not call another tool unless the
+result shows that more work is required."""
 
 
 def _content_text(content: Any) -> str:
@@ -47,26 +52,63 @@ def _content_text(content: Any) -> str:
     return ""
 
 
-def _agent_messages(messages: list[dict[str, Any]], *, limit: int = 16000) -> list[dict[str, str]]:
-    """Preserve roles while bounding what is sent to Together AI."""
-    selected: list[dict[str, str]] = []
+def _agent_messages(messages: list[dict[str, Any]], *, limit: int = 24000) -> list[dict[str, Any]]:
+    """Preserve roles and client tool-call state while bounding the prompt."""
+    selected: list[dict[str, Any]] = []
     budget = limit
-    for message in reversed(messages[-16:]):
+    for message in reversed(messages[-20:]):
         role = str(message.get("role") or "user")
         if role not in _VALID_ROLES:
             continue
         text = _content_text(message.get("content")).strip()
-        if not text:
+        item: dict[str, Any] = {"role": role, "content": text}
+        if role == "assistant" and message.get("tool_calls"):
+            item["tool_calls"] = message["tool_calls"]
+        if role == "tool" and message.get("tool_call_id"):
+            item["tool_call_id"] = message["tool_call_id"]
+        cost = len(text)
+        if item.get("tool_calls"):
+            cost += len(json.dumps(item["tool_calls"], ensure_ascii=False))
+        if not text and not item.get("tool_calls") and role != "tool":
             continue
-        text = text[: min(6000, max(0, budget))]
-        if not text:
-            break
-        selected.append({"role": role, "content": text})
-        budget -= len(text)
+        if cost > budget:
+            text = text[: max(0, budget)]
+            item["content"] = text
+            cost = len(text)
+        selected.append(item)
+        budget -= cost
         if budget <= 0:
             break
     selected.reverse()
     return selected or [{"role": "user", "content": "Hello"}]
+
+
+def _merge_tool_call_deltas(
+    accumulator: dict[int, dict[str, Any]], deltas: list[dict[str, Any]]
+) -> None:
+    """Assemble OpenAI streaming tool-call fragments for non-stream responses."""
+    for delta in deltas or []:
+        if not isinstance(delta, dict):
+            continue
+        index = int(delta.get("index", 0) or 0)
+        entry = accumulator.setdefault(
+            index,
+            {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        if delta.get("id"):
+            entry["id"] = str(delta["id"])
+        if delta.get("type"):
+            entry["type"] = str(delta["type"])
+        function = delta.get("function") or {}
+        if isinstance(function, dict):
+            if function.get("name"):
+                entry["function"]["name"] += str(function["name"])
+            if function.get("arguments"):
+                entry["function"]["arguments"] += str(function["arguments"])
 
 
 def _slug(value: str, index: int) -> str:
@@ -177,20 +219,27 @@ class AgenticService:
     ) -> AgentDecision:
         if not self.enabled:
             raise AgenticUnavailable("Together AI agentic layer is disabled")
-        if tools:
-            raise AgenticUnavailable("incoming tool loop stays on the deterministic path")
+
+        # A request carrying tool results is already inside a client-side tool loop.
+        # MiniMax must continue that conversation; it must not be re-planned as a task.
         for message in messages:
             if str(message.get("role") or "") == "tool" or message.get("tool_calls"):
-                raise AgenticUnavailable("incoming tool loop stays on the deterministic path")
+                return AgentDecision(
+                    mode="chat",
+                    confidence=0.9,
+                    reason="continuing a client tool loop",
+                    source="tool-loop",
+                )
 
         try:
             return await asyncio.wait_for(
                 decide(
                     self._client_or_raise(),
-                    model=self.settings.TOGETHER_DECISION_MODEL,
+                    model=self.settings.TOGETHER_AGENT_MODEL,
                     messages=messages,
                     tools=None,
                     max_tokens=self.settings.TOGETHER_DECISION_MAX_TOKENS,
+                    reasoning=self._reasoning(),
                 ),
                 timeout=min(30.0, self.settings.TOGETHER_TIMEOUT_S),
             )
@@ -230,10 +279,13 @@ class AgenticService:
         error: Optional[str] = None
         error_code = "agent_failed"
         retryable = False
+        tool_call_parts: dict[int, dict[str, Any]] = {}
         async for event in self.stream(decision, request, messages):
             event_type = str(event.get("event") or "")
             if event_type in ("delta", "merge_delta"):
                 text_parts.append(str(event.get("delta") or ""))
+            elif event_type == "tool_calls":
+                _merge_tool_call_deltas(tool_call_parts, event.get("tool_calls") or [])
             elif event_type == "done":
                 final = event
             elif event_type == "error":
@@ -242,7 +294,8 @@ class AgenticService:
                 retryable = bool(event.get("retryable"))
 
         text = str((final or {}).get("text") or "".join(text_parts)).strip()
-        if not text:
+        tool_calls = [tool_call_parts[index] for index in sorted(tool_call_parts)]
+        if not text and not tool_calls:
             raise AgenticRunError(
                 error or "the agent produced no answer",
                 code=error_code,
@@ -250,6 +303,12 @@ class AgenticService:
             )
         return {
             "text": text,
+            "tool_calls": tool_calls,
+            "finish_reason": (
+                "tool_calls"
+                if tool_calls
+                else str((final or {}).get("finish_reason") or "stop")
+            ),
             "usage": (final or {}).get("usage") or {},
             "decision": decision.to_dict(),
             "effective_mode": (final or {}).get("effective_mode", decision.mode),
@@ -280,9 +339,33 @@ class AgenticService:
         parts: list[str] = []
         finish: Optional[str] = None
         stream_error: Optional[TogetherError] = None
+        tool_calls_seen = False
+        tools = getattr(request, "tools", None)
+        tool_choice = getattr(request, "tool_choice", None)
+        parallel_tool_calls = getattr(request, "parallel_tool_calls", None)
+        agent_messages = _agent_messages(messages)
+        if tools:
+            # Append the guidance to the client's system prompt (or add one) so it wins
+            # over a coding-agent preamble that tells the model to reach for tools.
+            system_index = next(
+                (
+                    index
+                    for index in range(len(agent_messages) - 1, -1, -1)
+                    if agent_messages[index].get("role") == "system"
+                ),
+                None,
+            )
+            if system_index is None:
+                agent_messages.insert(0, {"role": "system", "content": _TOOL_USE_GUIDANCE})
+            else:
+                existing = str(agent_messages[system_index].get("content") or "")
+                agent_messages[system_index] = {
+                    "role": "system",
+                    "content": f"{existing}\n\n{_TOOL_USE_GUIDANCE}".strip(),
+                }
         try:
             async for event in self._client_or_raise().chat_stream(
-                _agent_messages(messages),
+                agent_messages,
                 model=self.settings.TOGETHER_AGENT_MODEL,
                 max_tokens=min(
                     int(request.max_tokens), self.settings.TOGETHER_AGENT_MAX_TOKENS
@@ -291,10 +374,16 @@ class AgenticService:
                 top_p=float(request.top_p),
                 stop=request.stop,
                 reasoning=self._reasoning(),
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
             ):
                 if event.get("content"):
                     parts.append(str(event["content"]))
                     yield {"event": "delta", "delta": str(event["content"])}
+                if event.get("tool_calls"):
+                    tool_calls_seen = True
+                    yield {"event": "tool_calls", "tool_calls": event["tool_calls"]}
                 if event.get("usage"):
                     usage = event["usage"]
                 if event.get("finish_reason"):
@@ -304,13 +393,15 @@ class AgenticService:
             stream_error = exc
 
         text = "".join(parts).strip()
-        if not text and (stream_error is None or stream_error.retryable):
+        if not text and not tool_calls_seen and (
+            stream_error is None or stream_error.retryable
+        ):
             # A stream that ends empty or is rate-limited gets one non-stream retry with
-            # the client's own backoff. The retry is skipped if content already reached
-            # the caller, so a partial answer is never duplicated.
+            # the client's own backoff. The retry is skipped if content or tool calls
+            # already reached the caller, so a partial answer is never duplicated.
             try:
                 result = await self._client_or_raise().chat(
-                    _agent_messages(messages),
+                    agent_messages,
                     model=self.settings.TOGETHER_AGENT_MODEL,
                     max_tokens=min(
                         int(request.max_tokens),
@@ -320,16 +411,30 @@ class AgenticService:
                     top_p=float(request.top_p),
                     stop=request.stop,
                     reasoning=self._reasoning(),
+                    tools=tools,
+                    tool_choice=tool_choice,
+                    parallel_tool_calls=parallel_tool_calls,
                 )
                 text = str(result.get("text") or "").strip()
                 if text:
                     usage = result.get("usage") or usage
                     yield {"event": "delta", "delta": text}
+                calls = result.get("tool_calls") or []
+                if calls:
+                    tool_calls_seen = True
+                    prepared = []
+                    for index, call in enumerate(calls):
+                        if isinstance(call, dict):
+                            item = dict(call)
+                            item.setdefault("index", index)
+                            prepared.append(item)
+                    if prepared:
+                        yield {"event": "tool_calls", "tool_calls": prepared}
             except TogetherError as exc:
                 logger.warning("Agent chat retry failed (%s): %s", exc.code, exc)
                 stream_error = stream_error or exc
 
-        if not text:
+        if not text and not tool_calls_seen:
             yield {
                 "event": "error",
                 "message": (
@@ -347,7 +452,8 @@ class AgenticService:
             "text": text,
             "usage": usage,
             "effective_mode": "chat",
-            "finish_reason": finish or "stop",
+            "finish_reason": "tool_calls" if tool_calls_seen else (finish or "stop"),
+            "tool_calls": tool_calls_seen,
             "tasks": [],
             "degraded": False,
         }
@@ -651,6 +757,8 @@ class AgenticService:
             usage = merge_usage(usage, result.get("usage"))
             content = str(result.get("text") or "").strip()
             if content:
+                # Stream MiniMax's own plan/update to the user before workers run.
+                yield {"event": "visible_status", "message": content[:800]}
                 yield {
                     "event": "progress",
                     "stage": "agent",

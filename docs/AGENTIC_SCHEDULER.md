@@ -1,25 +1,26 @@
 # RACoN Agentic Scheduler (Together AI)
 
-The agentic scheduler is an optional layer in front of the OpenAI-compatible surface. It
-uses Together AI for three stages — routing, planning/tool calls, and merge review — and the
-existing signed RACoN worker transport for execution.
+The agentic scheduler is an optional layer in front of the OpenAI-compatible surface.
+MiniMax is the router, chat responder, planner, and merger; the existing signed RACoN worker
+transport handles execution.
 
 ```
 client
   │  POST /v1/chat/completions   model=racon | racon-agent
   ▼
-decision model (Tev1-4B-experimental)
-  ├─ chat ──► agent model (MiniMax-M3.1-Flash) ──► streamed answer
+MiniMax router (one word, reasoning disabled)
+  ├─ chat ──► MiniMax answer/tool calls ──► streamed answer
   └─ task ──► live worker snapshot
-               └─ agent model plans with tool calls
+               └─ MiniMax plans with tool calls and streams a plan update
                     └─ tasks dispatched in parallel to the fastest suitable workers
                          └─ only final worker output returns to the coordinator
-                              └─ agent model merges + reviews with a low token budget
+                              └─ MiniMax merges + reviews with a bounded token budget
                                    └─ streamed final answer
 ```
 
-Progress is reported to the client through the `racon` sidecar on otherwise empty SSE
-chunks. The answer itself is the only `delta.content` the client receives.
+Task mode emits a visible status line and MiniMax's own plan update before workers run, then
+`: keepalive` SSE comments while they execute. The `racon` sidecar carries structured
+progress; the final answer streams as ordinary `delta.content`.
 
 ## Enable
 
@@ -31,12 +32,12 @@ never baked into the image or the web client.
 TOGETHER_ENABLED=true
 TOGETHER_API_KEY=tgp_...
 TOGETHER_BASE_URL=https://api.together.xyz/v1
-TOGETHER_DECISION_MODEL=together/Tev1-4B-experimental
 TOGETHER_AGENT_MODEL=MiniMaxAI/MiniMax-M3.1-Flash
 # 'none' disables hidden reasoning; required for fast, reliable normal chat.
 TOGETHER_REASONING_EFFORT=none
 TOGETHER_TIMEOUT_S=90
-TOGETHER_DECISION_MAX_TOKENS=96
+# One-word router budget.
+TOGETHER_DECISION_MAX_TOKENS=16
 TOGETHER_AGENT_MAX_TOKENS=2048
 RACON_AGENTIC_MAX_TASKS=6
 RACON_AGENTIC_MAX_PARALLEL=4
@@ -60,34 +61,36 @@ docker compose logs -f racn-coordinator
 | `model: "racon-agent"` | Explicitly selects the layer. If the layer is disabled, it falls back to one worker. |
 | `model: "racon-single"` / `racon-task` | Existing deterministic modes; unchanged. |
 | Explicit worker model | Existing single-worker path; unchanged. |
-| Request with `tools`, a `tool` role, or `tool_calls` | Existing single-worker path; the client's tool loop is never split or replaced. |
+| Request with `tools`, a `tool` role, or `tool_calls` | MiniMax continues the client's tool loop and streams tool calls back; it is not re-planned as a task. |
 
 ## Fast chat path
 
-Short user requests with no build or long-horizon signal skip the router and stream the
-agent model immediately. The gate only reads user turns, so a client system prompt that
-mentions "codebase", "implement", or "build" cannot turn a movie question into a task.
+MiniMax is the router. It gets the user turns only and answers exactly one word, `chat` or
+`task`; the gate then refuses a task unless the user text contains a build or long-horizon
+signal. A client system prompt that mentions "codebase", "implement", or "build" cannot turn
+a movie question into a worker plan.
 
 `TOGETHER_REASONING_EFFORT=none` is important for latency: MiniMax otherwise spends the
 entire output budget on hidden `reasoning_content` and returns no visible answer. With
-reasoning disabled, normal chat starts streaming in about two seconds.
+reasoning disabled, the router call is cheap and normal chat starts streaming in about two
+seconds.
 
-Genuine build requests still go through the decision model. Task mode emits a visible
-status line immediately and sends `: keepalive` SSE comments while workers run.
+Genuine build requests still enter task mode. Task mode emits a visible status line and
+MiniMax's plan update immediately, then sends `: keepalive` SSE comments while workers run.
 
 ## Routing decision
 
-The decision model is asked for exactly one lowercase word, `chat` or `task`. The parser also
-accepts JSON and a truncated JSON prefix because the experimental model has a small output
-window.
+MiniMax is asked for exactly one lowercase word, `chat` or `task`, with a 16-token budget.
 
-- `chat` — greetings, explanations, definitions, single snippets, short advice.
-- `task` — research/comparison, multi-section reports, planning with several deliverables,
-  or a request that asks for parallel work.
+- `chat` — greetings, suggestions, recommendations, explanations, definitions, single
+  snippets, short advice, and client tool loops.
+- `task` — only long-horizon build/implementation work, or a long research request with
+  explicit deliverables.
 
-If the decision model returns unusable output, the deterministic classifier in
-`backend/racon/network/intent.py` decides. If Together AI is unreachable, the whole layer
-steps aside and the existing gateway serves the request.
+If the router returns unusable output, the deterministic classifier in
+`backend/racon/network/intent.py` decides, and the user-only gate forces chat when there is
+no build signal. If Together AI is unreachable, the whole layer steps aside and the existing
+gateway serves the request.
 
 ## Worker snapshot and selection
 
