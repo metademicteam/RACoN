@@ -19,6 +19,7 @@ from typing import Any, AsyncIterator, Optional
 
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from backend.racon.agentic.errors import AgenticRunError, AgenticUnavailable
 from backend.racon.network.catalog import online_workers
 from backend.racon.network.intent import IntentDecision, choose_intent
 from backend.racon.orchestration.executor import InProcessDispatcher
@@ -141,6 +142,20 @@ def _options_from_request(request: Any) -> dict[str, Any]:
     }
 
 
+def _is_context_error(message: Any) -> bool:
+    lowered = str(message or "").lower()
+    return any(
+        hint in lowered
+        for hint in (
+            "context window",
+            "context length",
+            "exceeds the available context",
+            "prompt is too long",
+            "character budget",
+        )
+    )
+
+
 def _profile_for_worker_model(name: str) -> ModelProfile:
     return ModelProfile(
         name=name,
@@ -159,13 +174,226 @@ class NetworkGateway:
 
     async def handle_chat(self, request: Any, *, api_key_id: Optional[str] = None):
         messages = [_message_dict(message) for message in request.messages]
+
+        # The Together AI layer sits in front of the deterministic gateway for the
+        # network-facing `racon` and `racon-agent` aliases. Any availability failure
+        # falls through to the existing worker routing; a runtime failure after the
+        # decision is reported instead of silently switching layers.
+        if self._should_use_agent(request, messages):
+            try:
+                return await self._handle_agent(request, messages, api_key_id)
+            except AgenticUnavailable as exc:
+                logger.info("Agentic layer unavailable (%s); using deterministic gateway", exc)
+            except AgenticRunError as exc:
+                if exc.retryable and str(getattr(request, "model", "")).lower() == "racon":
+                    logger.warning(
+                        "Agentic layer failed transiently (%s); using deterministic gateway",
+                        exc,
+                    )
+                else:
+                    return _error_response(
+                        GatewayError(502, str(exc), exc.code, "server_error")
+                    )
+
         intent = choose_intent(request.model, messages, tools=request.tools)
+        if intent.mode == "agent":
+            intent = IntentDecision(
+                mode="single",
+                model=None,
+                classification=intent.classification,
+                forced=False,
+                reason="agentic layer unavailable; using one worker",
+            )
         try:
             if intent.mode == "task":
                 return await self._handle_task(request, messages, intent, api_key_id)
             return await self._handle_single(request, messages, intent, api_key_id)
         except GatewayError as exc:
             return _error_response(exc)
+
+    @staticmethod
+    def _should_use_agent(request: Any, messages: list[dict[str, Any]]) -> bool:
+        requested = str(getattr(request, "model", "") or "").strip().lower()
+        if requested not in {"racon", "racon-agent"}:
+            return False
+        if getattr(request, "tools", None):
+            return False
+        for message in messages:
+            if str(message.get("role") or "") == "tool" or message.get("tool_calls"):
+                return False
+        try:
+            from backend.racon.agentic.service import get_agentic_service
+
+            return get_agentic_service().enabled
+        except Exception:
+            logger.debug("Agentic availability check failed", exc_info=True)
+            return False
+
+    async def _handle_agent(
+        self,
+        request: Any,
+        messages: list[dict[str, Any]],
+        api_key_id: Optional[str],
+    ):
+        from backend.racon.agentic.service import get_agentic_service
+
+        service = get_agentic_service()
+        decision = await service.prepare(messages, tools=request.tools)
+        if request.stream:
+            return StreamingResponse(
+                self._agent_sse(service, decision, request, messages, api_key_id),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        result = await service.complete(decision, request, messages)
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": request.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": result["text"]},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": result.get("usage")
+            or {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                "reported": False,
+            },
+            "racon": {
+                "mode": "agent",
+                "effective_mode": result.get("effective_mode", decision.mode),
+                "decision": decision.to_dict(),
+                "tasks": result.get("tasks") or [],
+                "merge_model": result.get("merge_model"),
+                "degraded": bool(result.get("degraded")),
+                "api_key_id": api_key_id,
+            },
+        }
+
+    async def _agent_sse(
+        self,
+        service,
+        decision,
+        request: Any,
+        messages: list[dict[str, Any]],
+        api_key_id: Optional[str],
+    ) -> AsyncIterator[bytes]:
+        completion_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        created = int(time.time())
+        usage: dict[str, Any] = {}
+        emitted_content = False
+
+        def frame(payload: dict[str, Any]) -> bytes:
+            return f"data: {json.dumps(payload, separators=(',', ':'))}\n\n".encode("utf-8")
+
+        def chunk(
+            delta: dict[str, Any],
+            finish: Optional[str] = None,
+            racon: Optional[dict[str, Any]] = None,
+        ) -> bytes:
+            payload: dict[str, Any] = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": request.model,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+            }
+            if usage and finish:
+                payload["usage"] = usage
+            if racon:
+                payload["racon"] = racon
+            return frame(payload)
+
+        yield chunk({"role": "assistant"})
+        try:
+            async for event in service.stream(decision, request, messages):
+                event_type = str(event.get("event") or "")
+                if event_type in ("delta", "merge_delta"):
+                    text = str(event.get("delta") or "")
+                    if text:
+                        emitted_content = True
+                        yield chunk({"content": text})
+                    continue
+                if event_type == "done":
+                    usage = event.get("usage") or {}
+                    text = str(event.get("text") or "")
+                    if text and not emitted_content:
+                        emitted_content = True
+                        yield chunk({"content": text})
+                    yield chunk(
+                        {},
+                        finish="stop",
+                        racon={
+                            "mode": "agent",
+                            "event": "done",
+                            "effective_mode": event.get("effective_mode", decision.mode),
+                            "decision": decision.to_dict(),
+                            "tasks": event.get("tasks") or [],
+                            "merge_model": event.get("merge_model"),
+                            "degraded": bool(event.get("degraded")),
+                            "degraded_tasks": event.get("degraded_tasks") or [],
+                            "api_key_id": api_key_id,
+                        },
+                    )
+                    yield b"data: [DONE]\n\n"
+                    return
+                if event_type == "error":
+                    yield frame(
+                        {
+                            "error": {
+                                "message": str(event.get("message") or "agent failed"),
+                                "type": "server_error",
+                                "param": None,
+                                "code": str(event.get("code") or "agent_failed"),
+                            }
+                        }
+                    )
+                    yield b"data: [DONE]\n\n"
+                    return
+
+                payload: dict[str, Any] = {"mode": "agent", "event": event_type}
+                for key in (
+                    "stage",
+                    "message",
+                    "task_id",
+                    "title",
+                    "worker_id",
+                    "model",
+                    "status",
+                    "duration_ms",
+                    "ttft_ms",
+                    "claim_ms",
+                    "error",
+                    "output_chars",
+                    "task",
+                    "score",
+                    "latency_ms",
+                    "decision",
+                ):
+                    if key in event:
+                        payload[key] = event[key]
+                yield chunk({}, racon=payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # never terminate an SSE stream silently
+            logger.exception("Agentic stream failed")
+            yield frame(
+                {
+                    "error": {
+                        "message": str(exc) or "The agent stream failed",
+                        "type": "server_error",
+                        "param": None,
+                        "code": "agent_stream_failed",
+                    }
+                }
+            )
+            yield b"data: [DONE]\n\n"
 
     async def list_models(self) -> list[dict[str, Any]]:
         from backend.racon.network.catalog import network_model_entries
@@ -223,6 +451,12 @@ class NetworkGateway:
 
         text = "".join(text_parts)
         if not text and not tool_calls:
+            if _is_context_error(error):
+                raise GatewayError(
+                    400,
+                    error or "The prompt does not fit in the worker context window",
+                    "context_length_exceeded",
+                )
             raise GatewayError(
                 502,
                 error or "The worker returned no output",
@@ -432,13 +666,19 @@ class NetworkGateway:
                 delta = event.get("delta") or {}
                 yield chunk(delta)
             elif event.get("event") == "error":
+                message = str(event.get("error") or "worker failed")
+                context_error = _is_context_error(message)
                 yield frame(
                     {
                         "error": {
-                            "message": str(event.get("error") or "worker failed"),
-                            "type": "server_error",
+                            "message": message,
+                            "type": (
+                                "invalid_request_error" if context_error else "server_error"
+                            ),
                             "param": None,
-                            "code": "worker_failed",
+                            "code": (
+                                "context_length_exceeded" if context_error else "worker_failed"
+                            ),
                         }
                     }
                 )
@@ -684,7 +924,12 @@ class NetworkGateway:
     @staticmethod
     def _servable_model(name: str) -> bool:
         lowered = name.strip().lower()
-        return bool(lowered) and not lowered.endswith(":cloud") and "-cloud" not in lowered
+        return (
+            bool(lowered)
+            and not lowered.endswith(":cloud")
+            and "-cloud" not in lowered
+            and "mmproj" not in lowered
+        )
 
     def _workers_with_model(self, model: str) -> list[Any]:
         wanted = model.strip().lower()

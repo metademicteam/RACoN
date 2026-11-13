@@ -46,7 +46,9 @@ curl -X DELETE https://desktop-b7l73cl.tail6cb521.ts.net/api/v1/admin/keys/<id> 
 
 `GET /v1/models` returns:
 
-- `racon` — automatic: a query goes to one worker; a complex task is decomposed.
+- `racon` — automatic: a query goes to one worker; a complex task is decomposed. When the
+  Together AI layer is enabled, it first classifies chat vs task with the decision model.
+- `racon-agent` — explicitly use the Together AI decision/agent/merge layer.
 - `racon-single` — force one worker/model.
 - `racon-task` — force planner decomposition.
 - `racon-single:<model>` / `racon-task:<model>` — force the mode and pin a worker model.
@@ -68,6 +70,18 @@ curl -X DELETE https://desktop-b7l73cl.tail6cb521.ts.net/api/v1/admin/keys/<id> 
 
 Tools force the single-worker path: splitting an agent tool loop across machines would break
 the conversation.
+
+### Agentic scheduler (Together AI)
+
+When `TOGETHER_ENABLED=true` and `TOGETHER_API_KEY` is set, `racon` and `racon-agent` go
+through the agentic layer: the decision model classifies the request, normal chat is answered
+by the agent model, and task requests are planned with tool calls, dispatched in parallel to
+the fastest suitable workers, then merged and reviewed with a low token budget. Progress is
+streamed in the `racon` sidecar; only the final merged answer arrives as `delta.content`.
+
+See [AGENTIC_SCHEDULER.md](./AGENTIC_SCHEDULER.md) for the event shapes, scoring, fallbacks,
+and environment variables. Requests with `tools` still use the deterministic single-worker
+path.
 
 ## Examples
 
@@ -181,6 +195,14 @@ on the next beat. NAT'd workers work because they poll `/tasks/claim` and push
 | Task mode prompt | 6,000 characters (planner limit) |
 | Tasks per plan | 12 |
 | Tool requests | always single-worker |
+| Context window | `RACON_CONTEXT_SIZE` (API ceiling 262,144 tokens); each model is capped at its trained GGUF window |
+
+The context ceiling must be set on the coordinator **and** on every worker: a worker whose
+llama.cpp/Ollama was started with 8192 tokens rejects long prompts even when the gateway
+accepts them. Set `RACON_CONTEXT_SIZE=262144` and `RACON_KV_CACHE_TYPE=q8_0` in each
+worker's environment and restart its agent. The quantized KV cache keeps a 128k-262k window
+inside a small machine's RAM; install a model whose trained context is that large to use the
+full window.
 
 ## Troubleshooting
 

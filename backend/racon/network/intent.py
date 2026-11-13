@@ -12,7 +12,9 @@ from typing import Any, Iterable, Optional
 
 from backend.racon.orchestration.model_router import Classification, classify_messages
 
-NETWORK_MODELS = frozenset({"racon", "racon-single", "racon-task", "mesh", "auto"})
+NETWORK_MODELS = frozenset(
+    {"racon", "racon-single", "racon-task", "racon-agent", "mesh", "auto"}
+)
 
 _TASK_SIGNALS = (
     "compare and contrast",
@@ -54,7 +56,7 @@ _TOOL_LOOP_ROLES = frozenset({"tool"})
 
 @dataclass(frozen=True)
 class IntentDecision:
-    mode: str  # "single" | "task"
+    mode: str  # "single" | "task" | "agent"
     model: Optional[str]
     classification: Classification
     forced: bool = False
@@ -174,6 +176,22 @@ def choose_intent(
             classification=classification,
             forced=True,
             reason="racon-task:<model> forces decomposition with an explicit model",
+        )
+    if lowered == "racon-agent":
+        if _has_tool_loop(message_dicts, tools):
+            return IntentDecision(
+                mode="single",
+                model=None,
+                classification=classification,
+                forced=True,
+                reason="tool calls cannot be replaced by the agentic task layer",
+            )
+        return IntentDecision(
+            mode="agent",
+            model=None,
+            classification=classification,
+            forced=True,
+            reason="racon-agent selects the Together AI agentic layer",
         )
     if lowered == "racon-task":
         if _has_tool_loop(message_dicts, tools):

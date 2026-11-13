@@ -54,6 +54,30 @@ class _OllamaModelIncompatible(RuntimeError):
     """The model exists but cannot accept this request (for example, tools)."""
 
 
+def _worker_reasoning_enabled() -> bool:
+    return os.environ.get("RACON_REASONING", "off").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _worker_context_size() -> int:
+    """Context window this worker asks Ollama for.
+
+    The worker's own llama.cpp engine reads the same setting, so a distributed task gets
+    the same budget whichever runtime serves it. 8192 is the product default; an operator
+    can raise it with RACON_CONTEXT_SIZE.
+    """
+    try:
+        from racon.settings import get_settings
+
+        return int(get_settings().context_size or 8192)
+    except Exception:
+        return 8192
+
+
 def _ollama_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     converted: List[Dict[str, Any]] = []
     for message in messages:
@@ -497,8 +521,18 @@ class RaconAgent:
         # 2. Text Completion
         elif task_type == TaskType.TEXT_COMPLETION.value or task_type == "text_completion":
             prompt = parameters.get("prompt", "Hello RACoN")
-            max_tokens = int(parameters.get("max_tokens", 512) or 512)
+            max_tokens = int(parameters.get("max_tokens", 2048) or 2048)
             timeout_s = float(parameters.get("timeout_s", 300.0))
+            from racon.runtime.types import prompt_budget_error
+
+            budget = prompt_budget_error(
+                [{"role": "user", "content": prompt}],
+                _worker_context_size(),
+                max_tokens,
+                runtime="worker",
+            )
+            if budget is not None:
+                return {}, budget.message
 
             # Preferred path: a local Ollama daemon. This keeps the worker contract
             # identical on machines that already run Ollama.
@@ -510,7 +544,10 @@ class RaconAgent:
                         "model": model_name,
                         "prompt": prompt,
                         "stream": False,
-                        "options": {"num_predict": max_tokens},
+                        "options": {
+                            "num_predict": max_tokens,
+                            "num_ctx": _worker_context_size(),
+                        },
                     },
                     timeout=timeout_s,
                 )
@@ -620,6 +657,17 @@ class RaconAgent:
             return {}, "chat_completion requires messages"
         timeout_s = float(parameters.get("timeout_s", 600.0) or 600.0)
 
+        from racon.runtime.types import prompt_budget_error
+
+        budget = prompt_budget_error(
+            messages,
+            _worker_context_size(),
+            int(options.get("max_tokens", 2048) or 2048),
+            runtime="worker",
+        )
+        if budget is not None:
+            return {}, budget.message
+
         # Preferred path: the worker's Ollama daemon. It is already resident, streams
         # natively, and avoids binding an async HTTP client to a transient event loop.
         ollama_error: Optional[str] = None
@@ -718,7 +766,7 @@ class RaconAgent:
                     await send(delta, finish)
 
                 async def _stream() -> None:
-                    nonlocal finish_reason, usage
+                    nonlocal finish_reason, usage, buffer
                     async for chunk in engine.chat_stream(chat_messages, **kwargs):
                         if chunk.delta:
                             text_parts.append(chunk.delta)
@@ -789,10 +837,12 @@ class RaconAgent:
             "model": ollama_model,
             "messages": _ollama_messages(messages),
             "stream": True,
+            "think": _worker_reasoning_enabled(),
             "options": {
                 "temperature": float(options.get("temperature", 0.7) or 0.7),
                 "top_p": float(options.get("top_p", 0.95) or 0.95),
-                "num_predict": int(options.get("max_tokens", 512) or 512),
+                "num_predict": int(options.get("max_tokens", 2048) or 2048),
+                "num_ctx": _worker_context_size(),
             },
         }
         if options.get("stop"):
@@ -868,10 +918,25 @@ class RaconAgent:
                     "POST", "http://127.0.0.1:11434/api/chat", json=body
                 ) as response:
                     if response.status_code != 200:
-                        body = response.read().decode("utf-8", "replace")[:512]
+                        body = response.read().decode("utf-8", "replace")[:1024]
+                        lowered_body = body.lower()
+                        if response.status_code in (400, 413, 422) and any(
+                            hint in lowered_body
+                            for hint in (
+                                "context",
+                                "too many tokens",
+                                "prompt is too long",
+                                "exceed",
+                            )
+                        ):
+                            raise _OllamaModelIncompatible(
+                                f"The request does not fit in the Ollama context window "
+                                f"({_worker_context_size()} tokens). Increase "
+                                "RACON_CONTEXT_SIZE or shorten the conversation."
+                            )
                         if (
                             response.status_code == 400
-                            and "does not support tools" in body.lower()
+                            and "does not support tools" in lowered_body
                         ):
                             raise _OllamaModelIncompatible(
                                 f"Ollama model '{ollama_model}' does not support tool "
@@ -882,6 +947,8 @@ class RaconAgent:
                         raise _OllamaUnavailable(
                             f"Ollama returned HTTP {response.status_code}: {body}"
                         )
+                    saw_done = False
+                    saw_reasoning = False
                     for line in response.iter_lines():
                         if not line.strip():
                             continue
@@ -891,6 +958,8 @@ class RaconAgent:
                             continue
                         message = event.get("message") or {}
                         content = message.get("content") or ""
+                        if message.get("thinking"):
+                            saw_reasoning = True
                         calls = message.get("tool_calls")
                         if content:
                             text_parts.append(str(content))
@@ -913,10 +982,22 @@ class RaconAgent:
                                 "reported": True,
                             }
                             finish_reason = event.get("done_reason") or "stop"
+                            saw_done = True
                             break
+
+                    if not saw_done:
+                        raise _OllamaModelIncompatible(
+                            "Ollama stream ended before the terminal done event; "
+                            "the response is incomplete"
+                        )
 
             text = "".join(text_parts)
             if not text and not tool_calls:
+                if saw_reasoning:
+                    raise _OllamaModelIncompatible(
+                        "The model produced only reasoning content and no answer. "
+                        "Set RACON_REASONING=off or raise max_tokens."
+                    )
                 raise _OllamaUnavailable("Ollama returned an empty chat completion")
             final_reason = "tool_calls" if tool_calls else (finish_reason or "stop")
             flush(finish=final_reason)

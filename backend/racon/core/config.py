@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from platformdirs import user_data_dir, user_log_dir
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 APP_NAME = "racon"
@@ -109,10 +109,12 @@ class Settings(BaseSettings):
     API_PORT: int = Field(default=int(os.environ.get("RACON_PORT", "8765")), description="FastAPI server port")
     AUTH_TOKEN: str = Field(
         default_factory=_default_auth_token,
+        validation_alias=AliasChoices("RACON_AUTH_TOKEN", "AUTH_TOKEN"),
         description="Administrator authentication token. Never shipped in client builds.",
     )
     CLIENT_TOKEN: str = Field(
-        default=os.environ.get("RACON_CLIENT_TOKEN", "").strip(),
+        default="",
+        validation_alias=AliasChoices("CLIENT_TOKEN", "RACON_CLIENT_TOKEN"),
         description=(
             "Limited-scope token for desktop and web clients. Grants API access except "
             "admin operations and settings changes. Empty disables client access."
@@ -154,6 +156,89 @@ class Settings(BaseSettings):
         default=True,
         description="Whether Tailscale Funnel global internet access is enabled",
     )
+
+    # --- Together AI agentic scheduler -------------------------------------
+    # The layer is opt-in. Docker Compose enables it by default; host installs must set
+    # TOGETHER_ENABLED=true (or RACON_AGENTIC_ENABLED=true) and provide a key.
+    TOGETHER_ENABLED: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("TOGETHER_ENABLED", "RACON_AGENTIC_ENABLED"),
+        description="Enable the Together AI router/agent/merge layer for network requests",
+    )
+    TOGETHER_API_KEY: str = Field(
+        default="",
+        validation_alias=AliasChoices("TOGETHER_API_KEY", "RACON_TOGETHER_API_KEY"),
+        description="Together AI API key. Server-side only; never shipped to clients.",
+    )
+    TOGETHER_BASE_URL: str = Field(
+        default="https://api.together.xyz/v1",
+        description="OpenAI-compatible Together AI API base URL",
+    )
+    TOGETHER_DECISION_MODEL: str = Field(
+        default="together/Tev1-4B-experimental",
+        description="Low-cost model that classifies chat vs task",
+    )
+    TOGETHER_AGENT_MODEL: str = Field(
+        default="MiniMaxAI/MiniMax-M3.1-Flash",
+        description="Agent model used for chat, planning/tool calls, and merge review",
+    )
+    TOGETHER_TIMEOUT_S: float = Field(
+        default=90.0,
+        gt=0.0,
+        le=600.0,
+        description="Per-request Together AI timeout in seconds",
+    )
+    TOGETHER_DECISION_MAX_TOKENS: int = Field(
+        default=96,
+        ge=16,
+        le=512,
+        description="Output budget for the routing decision",
+    )
+    TOGETHER_AGENT_MAX_TOKENS: int = Field(
+        default=2048,
+        ge=128,
+        le=8192,
+        description="Output budget for the agent chat/planning model",
+    )
+    RACON_AGENTIC_MAX_TASKS: int = Field(
+        default=6,
+        ge=1,
+        le=12,
+        description="Maximum tasks the agent may dispatch in one request",
+    )
+    RACON_AGENTIC_MAX_PARALLEL: int = Field(
+        default=4,
+        ge=1,
+        le=12,
+        description="Maximum worker tasks executed concurrently",
+    )
+    RACON_AGENTIC_MERGE_MAX_TOKENS: int = Field(
+        default=2048,
+        ge=64,
+        le=4096,
+        description="Bounded ceiling for the merge/review pass (reasoning + answer)",
+    )
+    RACON_AGENTIC_WORKER_MODEL: str = Field(
+        default="",
+        description="Preferred worker model for agent tasks; empty picks the fastest advertised model",
+    )
+
+    @field_validator(
+        "TOGETHER_API_KEY",
+        "TOGETHER_BASE_URL",
+        "TOGETHER_DECISION_MODEL",
+        "TOGETHER_AGENT_MODEL",
+        "RACON_AGENTIC_WORKER_MODEL",
+        mode="before",
+    )
+    @classmethod
+    def _strip_agentic_strings(cls, v: Any) -> str:
+        return "" if v is None else str(v).strip()
+
+    @field_validator("TOGETHER_BASE_URL")
+    @classmethod
+    def _strip_trailing_slash(cls, v: str) -> str:
+        return v.rstrip("/")
 
     @field_validator("AUTH_TOKEN", mode="before")
     @classmethod

@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-VIRTUAL_MODEL_IDS = ("racon", "racon-single", "racon-task")
+VIRTUAL_MODEL_IDS = ("racon", "racon-single", "racon-task", "racon-agent")
 ONLINE_WINDOW_SECONDS = 30.0
 
 
@@ -18,7 +18,7 @@ def is_advertisable_model(name: str) -> bool:
         return False
     if lowered.endswith(":cloud") or "-cloud" in lowered:
         return False
-    if "embed" in lowered or "rerank" in lowered:
+    if "embed" in lowered or "rerank" in lowered or "mmproj" in lowered:
         return False
     return True
 
@@ -42,7 +42,13 @@ def online_workers() -> list[Any]:
         return []
 
 
-def _virtual_entry(model_id: str, description: str, *, available: bool) -> dict[str, Any]:
+def _virtual_entry(
+    model_id: str,
+    description: str,
+    *,
+    available: bool,
+    context_length: Optional[int] = None,
+) -> dict[str, Any]:
     return {
         "id": model_id,
         "object": "model",
@@ -52,9 +58,20 @@ def _virtual_entry(model_id: str, description: str, *, available: bool) -> dict[
             "virtual": True,
             "available": available,
             "installed": available,
+            "context_length": context_length,
             "description": description,
         },
     }
+
+
+def _network_context_length() -> Optional[int]:
+    """The context ceiling this gateway accepts, not a model's trained window."""
+    try:
+        from racon.settings import get_settings
+
+        return int(get_settings().context_size or 0) or None
+    except Exception:
+        return None
 
 
 def network_model_entries() -> list[dict[str, Any]]:
@@ -79,22 +96,34 @@ def network_model_entries() -> list[dict[str, Any]]:
         logger.debug("Local model inventory unavailable: %s", exc)
 
     available = bool(workers) or bool(local_models)
+    context_length = _network_context_length()
     entries: list[dict[str, Any]] = [
         _virtual_entry(
             "racon",
             "RACoN network: auto-select one worker for a query, or decompose a complex "
             "task across workers and merge the streamed results.",
             available=available,
+            context_length=context_length,
         ),
         _virtual_entry(
             "racon-single",
             "Force one worker/model and stream its answer.",
             available=available,
+            context_length=context_length,
         ),
         _virtual_entry(
             "racon-task",
             "Force planner decomposition across workers, then merge the results.",
             available=available,
+            context_length=context_length,
+        ),
+        _virtual_entry(
+            "racon-agent",
+            "Together AI agentic layer: a decision model classifies chat vs task, the agent "
+            "plans with tool calls, worker outputs are merged and reviewed, and progress is "
+            "streamed in the racon sidecar.",
+            available=True,
+            context_length=context_length,
         ),
     ]
 

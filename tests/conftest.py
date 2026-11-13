@@ -26,6 +26,10 @@ os.environ.setdefault("RACON_DATA_DIR", str(ROOT / ".pytest_cache" / "racon_data
 os.environ.setdefault("RACON_LOG_DIR", str(ROOT / ".pytest_cache" / "racon_logs"))
 os.environ.setdefault("RACON_JOIN_CODE", "RCN-TEST-JOIN")
 os.environ.setdefault("RACON_AUTO_APPROVE_WORKERS", "true")
+# Never let a developer .env with a real Together AI key turn the unit suite into a live
+# network test. The agentic tests inject a fake client explicitly.
+os.environ.setdefault("TOGETHER_ENABLED", "false")
+os.environ.setdefault("RACON_AGENTIC_ENABLED", "false")
 
 
 @pytest.fixture()

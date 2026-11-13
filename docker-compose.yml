@@ -38,7 +38,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.backend
     container_name: racn-coordinator
-    image: racon-server:1.2
+    image: racon-server:1.4
     restart: unless-stopped
     ports:
       - "8765:8765"
@@ -61,6 +61,12 @@ services:
       # cannot reach (http://host.docker.internal:11434). Operators who deliberately want
       # Ollama in the container set RACON_SERVER_RUNTIME=ollama.
       - RACON_RUNTIME=${RACON_SERVER_RUNTIME:-llama_cpp}
+      # Context ceiling for the OpenAI-compatible API. The llama.cpp adapter still caps
+      # the active window at each model's trained GGUF context, so a small model does not
+      # silently allocate a 262k KV cache. Set RACON_CONTEXT_SIZE in .env to change it.
+      - RACON_CONTEXT_SIZE=${RACON_CONTEXT_SIZE:-262144}
+      # Quantized KV cache keeps a long context inside the container's memory budget.
+      - RACON_KV_CACHE_TYPE=${RACON_KV_CACHE_TYPE:-q8_0}
       - RACON_LLAMA_DIR=/opt/racon/llama
       - RACON_OLLAMA_URL=${RACON_OLLAMA_URL:-http://host.docker.internal:11434}
       # Pin the legacy OLLAMA_URL too: the shared .env normally contains 127.0.0.1 for the
@@ -69,6 +75,20 @@ services:
       - HF_TOKEN=${HF_TOKEN:-}
       - LLAMA_SERVER_URL=http://racn-llama:8080
       - MODEL_REGISTRY_URL=http://racn-model-registry:8001
+      # Together AI agentic scheduler. The key stays in .env (gitignored) and is passed
+      # into the coordinator only; it is never bundled into the image or the web client.
+      - TOGETHER_ENABLED=${TOGETHER_ENABLED:-false}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY:-}
+      - TOGETHER_BASE_URL=${TOGETHER_BASE_URL:-https://api.together.xyz/v1}
+      - TOGETHER_DECISION_MODEL=${TOGETHER_DECISION_MODEL:-together/Tev1-4B-experimental}
+      - TOGETHER_AGENT_MODEL=${TOGETHER_AGENT_MODEL:-MiniMaxAI/MiniMax-M3.1-Flash}
+      - TOGETHER_TIMEOUT_S=${TOGETHER_TIMEOUT_S:-90}
+      - TOGETHER_DECISION_MAX_TOKENS=${TOGETHER_DECISION_MAX_TOKENS:-96}
+      - TOGETHER_AGENT_MAX_TOKENS=${TOGETHER_AGENT_MAX_TOKENS:-2048}
+      - RACON_AGENTIC_MAX_TASKS=${RACON_AGENTIC_MAX_TASKS:-6}
+      - RACON_AGENTIC_MAX_PARALLEL=${RACON_AGENTIC_MAX_PARALLEL:-4}
+      - RACON_AGENTIC_MERGE_MAX_TOKENS=${RACON_AGENTIC_MERGE_MAX_TOKENS:-2048}
+      - RACON_AGENTIC_WORKER_MODEL=${RACON_AGENTIC_WORKER_MODEL:-}
       - RACON_DEV_MODE=false
     volumes:
       - racon-data:/data
@@ -93,7 +113,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile.frontend
     container_name: racn-webapp
-    image: racon-webapp:1.2
+    image: racon-webapp:1.4
     restart: unless-stopped
     ports:
       - "3000:80"

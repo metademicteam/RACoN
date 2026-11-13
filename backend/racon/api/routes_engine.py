@@ -6,6 +6,7 @@ if no runtime can serve a model, the caller receives a structured 503.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -27,6 +28,7 @@ from backend.racon.orchestration.model_router import (
 )
 from racon.models.manager import ModelStorageError
 from racon.runtime.types import (
+    MAX_CONTEXT_TOKENS,
     ChatMessage,
     GenerationOptions,
     InferenceCancelledError,
@@ -59,7 +61,7 @@ class ChatCompletionRequest(BaseModel):
 
     model: str
     messages: list[ChatMessagePayload]
-    max_tokens: int = Field(default=512, ge=1, le=32768)
+    max_tokens: int = Field(default=2048, ge=1, le=MAX_CONTEXT_TOKENS)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     top_p: float = Field(default=0.95, ge=0.0, le=1.0)
     top_k: Optional[int] = Field(default=None, ge=0, le=1000)
@@ -80,7 +82,7 @@ class ChatCompletionRequest(BaseModel):
 
 class LoadModelRequest(BaseModel):
     model: str
-    context_size: Optional[int] = None
+    context_size: Optional[int] = Field(default=None, ge=128, le=MAX_CONTEXT_TOKENS)
 
 
 class ImportModelRequest(BaseModel):
@@ -381,6 +383,22 @@ async def _sse_stream(
             }
         )
         yield b"data: [DONE]\n\n"
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - never end an SSE stream silently
+        logger.exception("Unhandled streaming error")
+        yield frame(
+            {
+                "error": {
+                    "message": str(exc) or "The generation stream failed",
+                    "type": "server_error",
+                    "param": None,
+                    "code": "stream_failed",
+                    "details": {"exception": type(exc).__name__},
+                }
+            }
+        )
+        yield b"data: [DONE]\n\n"
 
 
 @router.post("/v1/chat/completions")
@@ -402,7 +420,13 @@ async def chat_completions(request: ChatCompletionRequest, http_request: Request
     # gateway. The local path below remains for the desktop UI and per-install token.
     api_key_id = getattr(http_request.state, "api_key_id", None)
     requested_lower = request.model.strip().lower()
-    network_alias = requested_lower in {"racon", "racon-single", "racon-task", "mesh"} or (
+    network_alias = requested_lower in {
+        "racon",
+        "racon-single",
+        "racon-task",
+        "racon-agent",
+        "mesh",
+    } or (
         requested_lower.startswith("racon-single:")
         or requested_lower.startswith("racon-task:")
     )
@@ -492,7 +516,7 @@ async def engine_status():
 @router.post("/api/v1/engine/load")
 async def engine_load(request: LoadModelRequest):
     try:
-        return await _engine().load_model(request.model)
+        return await _engine().load_model(request.model, context_size=request.context_size)
     except (RaconRuntimeError, ModelStorageError) as exc:
         return _error_response(exc)
 
@@ -544,7 +568,7 @@ async def engine_import_model(request: ImportModelRequest):
 @router.get("/api/v1/engine/models/{model_id}/estimate")
 async def engine_estimate(
     model_id: str,
-    context_size: int = Query(default=4096, ge=128, le=131072),
+    context_size: int = Query(default=8192, ge=128, le=MAX_CONTEXT_TOKENS),
     kv_cache_type: str = Query(default="f16"),
 ):
     try:

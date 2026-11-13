@@ -1,13 +1,135 @@
-# Changelog — RACoN Desktop
+# Changelog - RACoN Desktop
 
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.2.0] — 2026-11-07
+## [Unreleased]
 
-### Added — server mode, PostgreSQL and the operator console
+### Added - Together AI agentic scheduler
+
+- `racon` and `racon-agent` can now run through a Together AI layer: the
+  `together/Tev1-4B-experimental` decision model classifies chat vs task,
+  `MiniMaxAI/MiniMax-M3.1-Flash` answers normal chat, plans task requests with tool calls,
+  and merges/reviews worker outputs with a low token budget.
+- Task plans are dispatched in parallel to online workers with a measured fastest-node
+  score (claim latency/TTFT, load, RAM, model fit). Only final worker outputs return to the
+  coordinator; progress is streamed in the `racon` SSE sidecar.
+- Together settings are passed into the coordinator container from the gitignored `.env`.
+  The layer degrades to the deterministic gateway when disabled or unreachable, answers
+  directly when no worker is online, and marks deterministic merges as degraded.
+
+### Fixed - Cloudflare tunnel and admin routing
+
+- `racon.metademic.org` now has a per-user sign-in scheduled task for the Cloudflare
+  tunnel, restoring the public site after the tunnel had no active connection.
+- `/admin` and `/api/*` are routed to the coordinator through Cloudflare, so the admin
+  dashboard works on the public hostname instead of the static website container.
+
+## [1.4.0] - 2026-11-09
+
+### Fixed - OpenAI-compatible clients and tokens
+
+- `POST /v1/chat/completions`, `POST /chat/completions`, and trailing-slash variants now
+  reach the same handler. A request can no longer fall through to the SPA catch-all and
+  return a misleading `405 Method Not Allowed`.
+- Unknown `/v1` and `/api/v1` paths return a JSON 404 that names the endpoint.
+- The cluster gateway applies the same alias and trailing-slash normalization before its
+  allow-list, key check, and rate limits.
+- `RACON_CLIENT_TOKEN` from `.env` now resolves as the server's limited-scope
+  `CLIENT_TOKEN` through `AliasChoices`.
+
+### Added - local fallback runtime
+
+- New `racon.runtime.mistralrs` adapter runs a GGUF model in-process when llama.cpp is
+  missing or the Ollama daemon is not running. Streaming, cancellation, health, and
+  measured usage are supported.
+- `RACON_FALLBACK_RUNTIME=mistralrs` selects the fallback, and
+  `RACON_MISTRALRS_MODEL` / `RACON_MISTRALRS_QUANT` control the text-model default.
+- Windows and Linux specs collect the mistralrs wheel when it is present in the build
+  environment. A build without the wheel still succeeds and reports the runtime as
+  unavailable.
+
+### Changed - install-time connection
+
+- `scripts/build_desktop.ps1` generates `RACON_CLIENT_TOKEN` when `.env` has none and
+  writes `installer/client.json` with the public server URL and token.
+- The Windows and Linux installers copy `client.json` into per-user data. The desktop
+  shell reads it before opening the window and passes it to the SPA as launch settings.
+- The Settings panel keeps the token hidden behind Advanced connection settings and
+  never displays it by default.
+
+### Changed - interface and website
+
+- New tokenized desktop stylesheet with visible focus states, hover states, responsive
+  navigation, tabular numbers, and reduced-motion support.
+- Website rebuilt with a hero network visual, structured feature and download sections,
+  accessible mobile navigation, and copy controls.
+- Removed em dash characters from the website and application UI.
+- Version bumped to `1.4.0` for the Windows installer and Linux tarball/.deb.
+
+## [1.3.0] - 2026-11-08
+
+### Added - network model tiers, vision projectors and hardware matching
+
+- **Nine network-tier GGUF entries** with verified Hugging Face LFS SHA-256 values and exact
+  byte sizes: Qwen3.5 9B (medium GPU), Qwen3.8 27B and Ornith-1.5 35B-A3B (high GPU),
+  LFM3-VL 2B and OrcaCyber Nano (low GPU), and Qwen3.5 2B / Spark 1.7B / Ternary Bonsai 4B /
+  Qwen3.5 0.8B (CPU). Every public link is HEAD-checked by
+  `scripts/verify_model_links.py`.
+- **Hardware tiers** (`cpu`, `low_gpu`, `medium_gpu`, `high_gpu`) on catalog entries, with
+  `min_ram_mb` / `min_vram_mb`. `racon/models/matching.py` ranks models for a machine and
+  the scheduler can report per-worker suggestions.
+- **Per-worker model suggestions**: `GET /api/v1/admin/model-suggestions` returns each
+  node's measured tier, `recommended_model` and a ranked list. `GET /api/v1/models/suggestions`
+  does the same for the local machine.
+- **Multi-file model installs.** A model and its vision projector are downloaded, verified
+  and installed together; a `<model>.gguf.racon.json` sidecar records the projector.
+- **llama.cpp vision + GPU offload.** The adapter skips `mmproj-*` files as chat models,
+  auto-detects the sidecar, passes `--mmproj`, and enables full GPU offload only when the
+  GGUF actually fits measured VRAM (`RACON_AUTO_GPU_LAYERS=0` disables it).
+- **Gated model support.** OrcaCyber requires an accepted Hugging Face license and
+  `HF_TOKEN`; the downloader resolves the LFS digest with the token before writing bytes.
+- **Live node inventory** (from the previous session): model lists are refreshed on every
+  signed heartbeat, so `model="racon"` routes against what each worker currently has.
+
+### Fixed - context window and silent truncation
+
+- **Default context raised from 4096 to 8192** tokens (`RACON_CONTEXT_SIZE`). The runtime
+  caps it at the model's trained GGUF context rather than extending past training.
+- **One llama.cpp slot** (`--parallel 1`) so the whole context budget belongs to the
+  request; newer llama-server defaults could split it across slots.
+- **`POST /api/v1/engine/load` honours `context_size`** instead of ignoring it.
+- **No silent truncation:** llama.cpp and Ollama streams that end without a terminal
+  event now raise an error; the desktop SSE client reports `stream_incomplete` instead of
+  calling `onDone`, and the API SSE route has a catch-all error frame.
+- **Context overflow is typed:** `context_length_exceeded` (HTTP 400) with a message to
+  raise `RACON_CONTEXT_SIZE` or shorten the conversation.
+- **Chat output budget raised** from 512 to 2048 tokens in the desktop UI, API schema,
+  engine defaults, and the PySide6 chat worker. Workers send `num_ctx` to Ollama.
+- **Thinking-model fix:** Qwen3.5 defaults to thinking and could spend the entire output
+  budget in `reasoning_content`, returning empty `content`. llama.cpp now starts with
+  `--reasoning off` and Ollama requests send `think: false` (`RACON_REASONING=on/auto`
+  opts back in). A reasoning-only response is reported as an explicit error instead of an
+  empty completion.
+- **Character-budget preflight:** prompts far above `RACON_CONTEXT_SIZE * 4` characters
+  are rejected with `context_length_exceeded` before dispatch, so Ollama can no longer
+  silently truncate them.
+
+### Changed
+
+- **Preconfigured desktop token.** `scripts/build_desktop.ps1` reads the limited-scope
+  `RACON_CLIENT_TOKEN` from `.env` and compiles it as `VITE_DEFAULT_AUTH_TOKEN`; the
+  Windows and Linux build scripts run it automatically. The administrator token is never
+  embedded. A new `scripts/build_windows.ps1` wraps the frontend, PyInstaller and Inno
+  Setup steps.
+- Version bumped to `1.3.0` for the Windows installer and Linux tarball/.deb.
+- `ModelManager.installed()` no longer reports `mmproj` projectors as servable models.
+
+## [1.2.0] - 2026-11-07
+
+### Added - server mode, PostgreSQL and the operator console
 
 - **Unified server.** The Docker container now exposes the worker ingress (`/discover`,
   `/enroll`, `/heartbeat`, `/tasks/claim`, `/tasks/report`) from the same FastAPI app as the
@@ -46,7 +168,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `/opt/racon/llama`, so verified GGUF downloads are servable inside the container without
   a host runtime. `RACON_RUNTIME=ollama` remains available.
 
-### Security — scoped client token (2026-11-08)
+### Security - scoped client token (2026-11-08)
 
 - **Administrator and client tokens are separate.** `AUTH_TOKEN` is the operator secret;
   `RACON_CLIENT_TOKEN` is the limited-scope token compiled into desktop and web builds.
@@ -61,7 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `tests/test_token_scopes.py` for scope enforcement (client allowed, client forbidden
   from admin/settings writes, admin allowed, unknown token rejected).
 
-### Added — RACoN Network Gateway (2026-11-08)
+### Added - RACoN Network Gateway (2026-11-08)
 
 - **RACoN inference keys.** DB-backed `rk_` keys with SHA-256-at-rest storage, per-key rate
   limits, revocation, last-used audit, admin CRUD (`/api/v1/admin/keys`) and an API-keys tab in
@@ -88,7 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `docs/RACON_NETWORK.md`, `tests/test_api_keys.py`, `tests/test_network_gateway.py`, and
   `tests/test_openai_compat.py`.
 
-### Fixed — worker inventory and enrollment (2026-11-08)
+### Fixed - worker inventory and enrollment (2026-11-08)
 
 - **Real hardware in the admin console.** `node_capabilities` is now refreshed on every
   enrollment (CPU, cores, GPU/VRAM, runtimes, OS, RPC endpoint, models, features), and
@@ -114,7 +236,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RACON_COORDINATOR_URL` still overrides both.
 - Added `tests/test_node_capabilities.py` (persist, refresh and return hardware).
 
-### Fixed — networking and model delivery
+### Fixed - networking and model delivery
 
 - **Docker image now copies `protocols/`**; without it every enrollment import failed.
 - **`RACON_MODEL_DIR=/models`** aligns the coordinator's downloads with the shared
@@ -127,20 +249,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Worker engine fallback.** `text_completion` tries Ollama first, then the worker's local
   RACoN engine, so a llama.cpp-only worker can execute distributed tasks.
 
-### Added — deployment assets
+### Added - deployment assets
 
 - `scripts/start_server.ps1` (build stack, wait for health, print tailnet URLs) and
   `scripts/start_worker.ps1` (join a server headless or with the desktop UI).
-- `docs/SERVER_DEPLOYMENT.md` — Windows host + Tailscale + PostgreSQL + Docker runbook.
-- `racon_original/` — a clean snapshot of the documentation and source tree.
+- `docs/SERVER_DEPLOYMENT.md` - Windows host + Tailscale + PostgreSQL + Docker runbook.
+- `racon_original/` - a clean snapshot of the documentation and source tree.
 
-## [1.1.0] — 2026-11-05
+## [1.1.0] - 2026-11-05
 
-### Added — Friend AI and first-run setup (2026-11-05)
+### Added - Friend AI and first-run setup (2026-11-05)
 
 - **Friend AI tab** (formerly Playground): a local persona that streams from the on-device
   runtime, plus a **RACoN network** mode that submits a real orchestration job and renders
-  the live task graph in the conversation — per-task state, assigned worker, attempt count,
+  the live task graph in the conversation - per-task state, assigned worker, attempt count,
   final synthesis, and an explicit partial/failed explanation. Jobs can be cancelled from
   the chat.
 - **First-run setup card** on the Overview: when no model is installed it shows the measured
@@ -148,7 +270,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /api/v1/models/recommendations`, download progress, and a path to Friend AI. No
   assumed hardware values are displayed.
 
-### Fixed — windowed launch, database isolation, planner robustness (2026-11-05)
+### Fixed - windowed launch, database isolation, planner robustness (2026-11-05)
 
 - **Windowed (console-less) builds now start.** PyInstaller `console=False` sets
   `sys.stdout`/`sys.stderr` to `None`; uvicorn's formatter calls `sys.stdout.isatty()` while
@@ -167,7 +289,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Linux Docker build** writes the inner shell script with LF endings instead of passing a
   multi-line argument through PowerShell (which truncated it).
 
-### Added — agentic orchestration (2026-11-05)
+### Added - agentic orchestration (2026-11-05)
 
 - **Orchestration package** (`backend/racon/orchestration/`): planner agent, bounded plan
   schema, DAG validation with cycle detection, weighted worker selection, two real
@@ -188,7 +310,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the structured task outputs are preserved instead of a fabricated answer.
 - **Cancellation and recovery**: cancelling stops dispatch and marks outstanding tasks
   cancelled. On process start, non-terminal jobs are marked failed with an explicit
-  "interrupted by process restart" reason — no silent resume.
+  "interrupted by process restart" reason - no silent resume.
 - **Jobs API**: `POST /api/v1/jobs` (202), `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`,
   `GET /api/v1/jobs/{id}/events` (SSE), `POST /api/v1/jobs/{id}/cancel`.
 - **Task Center UI**: request form (model, execution mode, decomposition, parallelism), job
@@ -199,7 +321,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Local GGUF import**: `POST /api/v1/engine/models/import` copies and validates a local
   GGUF file; the fake `alert()` import stub is gone.
 
-### Added — Hugging Face distribution and cloud registry
+### Added - Hugging Face distribution and cloud registry
 
 - **Hugging Face GGUF downloads** (`racon/models/huggingface.py`): repository validation,
   LFS SHA-256 discovery, HTTPS-only URLs, and integration with the verified model manager.
